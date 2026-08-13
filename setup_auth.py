@@ -9,7 +9,10 @@ import os
 import re
 from pathlib import Path
 
+from dotenv import load_dotenv
 from ytmusicapi import setup
+
+load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_AUTH_FILE = Path(__file__).resolve().with_name("browser.json")

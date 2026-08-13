@@ -1,21 +1,21 @@
 [Unit]
-Description=YouTube Music MCP Server (personal, localhost-only backend)
-After=network.target
+Description=YouTube Music MCP Server
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=YOUR_LINUX_USER
-WorkingDirectory=/opt/ytmusic-mcp
-EnvironmentFile=/opt/ytmusic-mcp/.env
-ExecStart=/usr/bin/python3 /opt/ytmusic-mcp/server.py
+User=ubuntu
+Group=ubuntu
+
+WorkingDirectory=/home/ubuntu/prj/ytmusic-mcp
+EnvironmentFile=/home/ubuntu/prj/ytmusic-mcp/.env
+ExecStart=/home/ubuntu/prj/ytmusic-mcp/.venv/bin/python /home/ubuntu/prj/ytmusic-mcp/server.py
+
 Restart=on-failure
 RestartSec=5
 
-# Light hardening: process can't see/touch the rest of the filesystem
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/ytmusic-mcp
 
 [Install]
 WantedBy=multi-user.target

@@ -50,7 +50,7 @@ python3 -c "from server import get_client; print(get_client().get_library_playli
 
 ```bash
 sudo mkdir -p /opt/ytmusic-mcp
-sudo cp server.py requirements.txt /opt/ytmusic-mcp/
+sudo cp server.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
 sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
 cd /opt/ytmusic-mcp
 sudo pip install -r requirements.txt --break-system-packages
@@ -66,6 +66,11 @@ sudo nano /opt/ytmusic-mcp/.env               # paste it into MCP_BEARER_TOKEN
 
 Leave `MCP_HOST=127.0.0.1` — the app must never bind directly to the public
 interface. nginx is the only thing facing the internet.
+
+Both direct Python runs and the systemd unit load this same `.env` file.
+Values already exported by the shell or supplied by systemd take precedence.
+nginx does not read dotenv files, so if you change `MCP_PORT` from `8787`,
+also change the port in `proxy_pass` in `nginx-ytmusic-mcp.conf`.
 
 ### 4.3 Run as a systemd service
 

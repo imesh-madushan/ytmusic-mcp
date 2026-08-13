@@ -18,9 +18,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer
 from ytmusicapi import YTMusic
 from ytmusicapi.helpers import get_authorization, sapisid_from_cookie
+
+# Apply the project configuration to direct runs as well as systemd launches.
+# Existing process/systemd variables take precedence over values in the file.
+load_dotenv(Path(__file__).resolve().with_name(".env"))
 
 logging.basicConfig(
     level=os.environ.get("YTMUSIC_LOG_LEVEL", "INFO").upper(),
