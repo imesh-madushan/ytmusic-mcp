@@ -39,7 +39,66 @@ AUTH_FILE = Path(os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser.json"),
 )).resolve()
 
-mcp = MCPServer("youtube-music")
+OAUTH_PROVIDER = None
+if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
+    from pydantic import AnyHttpUrl
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+    from oauth_provider import PasswordOAuthProvider
+
+    public_url = os.environ.get("MCP_PUBLIC_URL", "").rstrip("/")
+    oauth_username = os.environ.get("OAUTH_USERNAME", "")
+    oauth_password = os.environ.get("OAUTH_PASSWORD", "")
+    if not public_url or not oauth_username or not oauth_password:
+        sys.exit("MCP_PUBLIC_URL, OAUTH_USERNAME, and OAUTH_PASSWORD are required in HTTP mode")
+    issuer_url = public_url.rsplit("/", 1)[0]
+    OAUTH_PROVIDER = PasswordOAuthProvider(issuer_url, oauth_username, oauth_password, "ytmusic")
+    static_client_id = os.environ.get("OAUTH_CLIENT_ID", "")
+    static_client_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
+    static_redirect_uris = [
+        value.strip()
+        for value in os.environ.get("OAUTH_REDIRECT_URIS", "").split(",")
+        if value.strip()
+    ]
+    if any((static_client_id, static_client_secret, static_redirect_uris)):
+        if not all((static_client_id, static_client_secret, static_redirect_uris)):
+            sys.exit(
+                "OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, and OAUTH_REDIRECT_URIS "
+                "must all be set when using a static OAuth client"
+            )
+        OAUTH_PROVIDER.add_static_client(
+            static_client_id, static_client_secret, static_redirect_uris
+        )
+    mcp = MCPServer(
+        "youtube-music",
+        auth_server_provider=OAUTH_PROVIDER,
+        auth=AuthSettings(
+            issuer_url=AnyHttpUrl(issuer_url),
+            resource_server_url=AnyHttpUrl(public_url),
+            required_scopes=["ytmusic"],
+            client_registration_options=ClientRegistrationOptions(
+                enabled=True,
+                valid_scopes=["ytmusic"],
+                default_scopes=["ytmusic"],
+            ),
+            revocation_options=RevocationOptions(enabled=True),
+        ),
+    )
+else:
+    mcp = MCPServer("youtube-music")
+
+
+if OAUTH_PROVIDER is not None:
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    @mcp.custom_route("/login", methods=["GET"])
+    async def oauth_login(request: Request) -> Response:
+        state = request.query_params.get("state", "")
+        return await OAUTH_PROVIDER.login_page(state)
+
+    @mcp.custom_route("/login/callback", methods=["POST"])
+    async def oauth_login_callback(request: Request) -> Response:
+        return await OAUTH_PROVIDER.login_callback(request)
 
 _yt: YTMusic | None = None
 
@@ -303,35 +362,16 @@ if __name__ == "__main__":
     if transport == "http":
         # --- Remote hosting mode -------------------------------------------------
         # Serves the server over Streamable HTTP (what Claude/ChatGPT custom
-        # connectors speak) at http://HOST:PORT/mcp, protected by a bearer token.
+        # connectors speak) at http://HOST:PORT/mcp, protected by OAuth.
         import uvicorn
         from starlette.applications import Starlette
-        from starlette.middleware.base import BaseHTTPMiddleware
-        from starlette.responses import JSONResponse
-        from starlette.requests import Request
-
-        SERVER_TOKEN = os.environ.get("MCP_BEARER_TOKEN")
-        if not SERVER_TOKEN:
-            sys.exit(
-                "MCP_BEARER_TOKEN is not set. Generate one (e.g. `openssl rand -hex 32`) "
-                "and export it before running in http mode."
-            )
-
-        class BearerAuthMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next):
-                auth = request.headers.get("authorization", "")
-                if auth != f"Bearer {SERVER_TOKEN}":
-                    return JSONResponse({"error": "unauthorized"}, status_code=401)
-                return await call_next(request)
-
         host = os.environ.get("MCP_HOST", "127.0.0.1")
         port = int(os.environ.get("MCP_PORT", "8787"))
 
         app: Starlette = mcp.streamable_http_app(host=host)
-        app.add_middleware(BearerAuthMiddleware)
 
         LOGGER.info(
-            "Serving MCP over Streamable HTTP on http://%s:%s/mcp (bearer-token protected)",
+            "Serving MCP over Streamable HTTP on http://%s:%s/mcp (OAuth protected)",
             host,
             port,
         )

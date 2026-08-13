@@ -5,7 +5,7 @@ search YouTube Music and manage playlists: create/delete, add/remove tracks,
 reorder tracks (top/bottom/before another track).
 
 **Scope of this setup:** built for exactly one user (you), hosted on your
-own Ubuntu box, reachable only with a secret bearer token. Recommended to
+own Ubuntu box, protected by an OAuth 2.1 login. Recommended to
 run against a **secondary Google account**, not your main one, since a
 leaked token means full playlist read/write access to whatever account is
 authenticated.
@@ -50,7 +50,7 @@ python3 -c "from server import get_client; print(get_client().get_library_playli
 
 ```bash
 sudo mkdir -p /opt/ytmusic-mcp
-sudo cp server.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
+sudo cp server.py oauth_provider.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
 sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
 cd /opt/ytmusic-mcp
 sudo pip install -r requirements.txt --break-system-packages
@@ -60,8 +60,8 @@ sudo pip install -r requirements.txt --break-system-packages
 
 ```bash
 sudo cp .env.example /opt/ytmusic-mcp/.env
-openssl rand -hex 32                          # generate your token
-sudo nano /opt/ytmusic-mcp/.env               # paste it into MCP_BEARER_TOKEN
+openssl rand -base64 32                       # generate the OAuth login password
+sudo nano /opt/ytmusic-mcp/.env               # set public URL, username, and password
 ```
 
 Leave `MCP_HOST=127.0.0.1` — the app must never bind directly to the public
@@ -83,7 +83,7 @@ sudo systemctl status ytmusic-mcp
 journalctl -u ytmusic-mcp -f                        # tail logs
 ```
 
-### 4.4 nginx — only port 443, only path /mcp
+### 4.4 nginx — HTTPS MCP and OAuth routes
 
 ```bash
 sudo apt install nginx certbot python3-certbot-nginx
@@ -99,10 +99,10 @@ record works), and ports 80+443 open in your firewall. Port 80 exists only
 to redirect to HTTPS and serve certbot's renewal challenge — nothing else
 is served there.
 
-This config makes **only `/mcp` reachable**; every other path (`/`,
-`/admin`, `/.env`, etc.) returns a bare 404 before hitting your app at all.
-It also rate-limits requests (30/min, burst 10) to blunt brute-force/scan
-traffic.
+This config exposes `/ytmusic-mcp` and the small set of OAuth discovery,
+registration, authorization, token, and login routes it requires. Other paths
+(`/`, `/admin`, `/.env`, etc.) return a bare 404 before hitting the app.
+It rate-limits MCP and login attempts (30/min, burst 10).
 
 ### 4.5 fail2ban — auto-ban repeat offenders
 
@@ -120,43 +120,45 @@ for 24h.
 ### 4.6 Verify from outside
 
 ```bash
-curl -i https://mcp.yourdomain.com/mcp      # expect 401 (reachable, but locked)
+curl -i https://mcp.yourdomain.com/ytmusic-mcp # expect 401 with OAuth metadata
 curl -i https://mcp.yourdomain.com/anything # expect 404 (nothing else exposed)
 ```
 
-Your MCP endpoint: **`https://mcp.yourdomain.com/mcp`**
+Your MCP endpoint: **`https://mcp.yourdomain.com/ytmusic-mcp`**
 
 ---
 
 ## 5. Connect from Claude.ai
 
 1. **Settings → Connectors → Add custom connector.**
-2. URL: `https://mcp.yourdomain.com/mcp`
-3. Advanced settings → add header: `Authorization: Bearer <your MCP_BEARER_TOKEN>`
-4. Save, then enable it in a conversation via **+ → Connectors**.
+2. URL: `https://mcp.yourdomain.com/ytmusic-mcp`
+3. Normally leave Client ID and Client Secret empty; Claude will use OAuth
+   Dynamic Client Registration. To use the advanced fields instead, configure
+   the matching `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, and Claude callback
+   URI in `OAUTH_REDIRECT_URIS` first.
+4. Save, complete the private username/password login, then enable it in a
+   conversation via **+ → Connectors**.
 
 ## 6. Connect from ChatGPT
 
 ChatGPT's remote-connector/custom-header support has been shifting between
 plan tiers and connector types — worth checking OpenAI's current docs for
 the exact click path when you get there. The server side doesn't change:
-it's a standard endpoint at `https://mcp.yourdomain.com/mcp` expecting
-`Authorization: Bearer <token>`. If their UI doesn't support custom headers
-for a given connector type, that combination just won't work until it does
-— nothing to fix on your end in that case.
+it's a standard endpoint at `https://mcp.yourdomain.com/ytmusic-mcp` using
+the standard MCP OAuth discovery and authorization flow.
 
 ---
 
 ## Security summary
 
-- Token is the only thing standing between the internet and your YouTube
-  account (via `browser.json`) — treat it like a root password.
-- App binds `127.0.0.1` only; nginx is the sole public-facing surface, and
-  only exposes `/mcp` on `:443`.
+- The OAuth login protects access to your YouTube account (via `browser.json`)
+  — use a generated password and keep it private.
+- App binds `127.0.0.1` only; nginx is the sole public-facing surface and
+  exposes only the MCP resource and required OAuth routes on `:443`.
 - Rate limiting + fail2ban blunt scanning/brute-force attempts.
 - Using a secondary Google account caps the blast radius of a leak to that
   account's playlists, not your main one.
-- Rotate the token any time you suspect exposure: regenerate, update `.env`,
+- Rotate the OAuth password any time you suspect exposure: regenerate, update `.env`,
   `sudo systemctl restart ytmusic-mcp`.
 - `browser.json` can expire — re-run `setup_auth.py` (on your dev machine,
   then re-copy to the server) if calls start failing with auth errors.
