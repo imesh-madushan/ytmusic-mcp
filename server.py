@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import sys
+import time
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,13 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 LOGGER = logging.getLogger(__name__)
+
+# DEBUG is useful for this application's diagnostics, but dependency DEBUG logs
+# include raw JSON-RPC/SSE payloads and overwhelm journald. They can be enabled
+# separately when protocol-level troubleshooting is actually needed.
+LIBRARY_LOG_LEVEL = os.environ.get("MCP_LIBRARY_LOG_LEVEL", "INFO").upper()
+for logger_name in ("mcp", "sse_starlette", "httpx", "httpcore"):
+    logging.getLogger(logger_name).setLevel(LIBRARY_LOG_LEVEL)
 
 AUTH_FILE = Path(os.environ.get(
     "YTMUSIC_AUTH_FILE",
@@ -103,6 +112,19 @@ if OAUTH_PROVIDER is not None:
 _yt: YTMusic | None = None
 
 
+def log_tool_errors(func):
+    """Log tool failures with a traceback, then let MCP report them to the client."""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception:
+            LOGGER.exception("MCP tool %s failed", func.__name__)
+            raise
+
+    return wrapper
+
+
 def load_browser_auth(auth_file: Path = AUTH_FILE) -> dict[str, Any]:
     """Load cookie headers and add ytmusicapi's browser-auth hash in memory."""
     try:
@@ -167,6 +189,7 @@ def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool()
+@log_tool_errors
 def search_music(query: str, filter: str = "songs", limit: int = 10) -> list[dict[str, Any]]:
     """Search YouTube Music for songs, videos, albums, artists, or playlists.
 
@@ -197,6 +220,7 @@ def search_music(query: str, filter: str = "songs", limit: int = 10) -> list[dic
 
 
 @mcp.tool()
+@log_tool_errors
 def list_my_playlists(limit: int = 50) -> list[dict[str, Any]]:
     """List the current user's playlists (id, title, track count)."""
     yt = get_client()
@@ -212,6 +236,7 @@ def list_my_playlists(limit: int = 50) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+@log_tool_errors
 def get_playlist(playlist_id: str, limit: int = 200) -> dict[str, Any]:
     """Get a playlist's metadata and its ordered list of tracks.
 
@@ -219,7 +244,31 @@ def get_playlist(playlist_id: str, limit: int = 200) -> dict[str, Any]:
     remove_tracks_from_playlist and reorder_playlist_track (NOT videoId).
     """
     yt = get_client()
-    pl = yt.get_playlist(playlist_id, limit=limit)
+    try:
+        pl = yt.get_playlist(playlist_id, limit=limit)
+    except KeyError as exc:
+        # ytmusicapi 1.12 cannot parse YouTube's minimal response for a newly
+        # created empty playlist. Recover its metadata from the user's library.
+        if "Unable to find 'contents'" not in str(exc):
+            raise
+        summary = next(
+            (
+                item
+                for item in yt.get_library_playlists(limit=None)
+                if item.get("playlistId") == playlist_id
+            ),
+            None,
+        )
+        if summary is None:
+            raise
+        pl = {
+            "id": playlist_id,
+            "title": summary.get("title"),
+            "description": summary.get("description", ""),
+            "privacy": summary.get("privacy", "PRIVATE"),
+            "trackCount": 0,
+            "tracks": [],
+        }
     return {
         "playlistId": pl.get("id"),
         "title": pl.get("title"),
@@ -231,16 +280,18 @@ def get_playlist(playlist_id: str, limit: int = 200) -> dict[str, Any]:
 
 
 @mcp.tool()
+@log_tool_errors
 def create_playlist(
     title: str, description: str = "", privacy_status: str = "PRIVATE"
 ) -> dict[str, Any]:
     """Create a new playlist. privacy_status: PUBLIC, PRIVATE, or UNLISTED."""
     yt = get_client()
-    playlist_id = yt.create_playlist(title, description, privacyStatus=privacy_status)
+    playlist_id = yt.create_playlist(title, description, privacy_status=privacy_status)
     return {"playlistId": playlist_id, "title": title}
 
 
 @mcp.tool()
+@log_tool_errors
 def delete_playlist(playlist_id: str) -> str:
     """Permanently delete a playlist you own."""
     yt = get_client()
@@ -249,6 +300,7 @@ def delete_playlist(playlist_id: str) -> str:
 
 
 @mcp.tool()
+@log_tool_errors
 def rename_playlist(
     playlist_id: str,
     title: str | None = None,
@@ -269,6 +321,7 @@ def rename_playlist(
 
 
 @mcp.tool()
+@log_tool_errors
 def add_tracks_to_playlist(
     playlist_id: str, video_ids: list[str], add_to_top: bool = False, allow_duplicates: bool = False
 ) -> str:
@@ -277,15 +330,22 @@ def add_tracks_to_playlist(
     add_to_top: if True, new tracks are inserted at the top instead of appended.
     """
     yt = get_client()
-    result = yt.add_playlist_items(
-        playlist_id, video_ids, duplicates=allow_duplicates
-    )
     if add_to_top:
         yt.edit_playlist(playlist_id, addToTop=True)
+    try:
+        result = yt.add_playlist_items(
+            playlist_id, video_ids, duplicates=allow_duplicates
+        )
+    finally:
+        if add_to_top:
+            # addToTop is persistent playlist state; restore normal append behavior
+            # so this option affects only the current tool call.
+            yt.edit_playlist(playlist_id, addToTop=False)
     return f"Added {len(video_ids)} track(s): {result}"
 
 
 @mcp.tool()
+@log_tool_errors
 def remove_tracks_from_playlist(playlist_id: str, set_video_ids: list[str]) -> str:
     """Remove tracks from a playlist.
 
@@ -314,6 +374,7 @@ def remove_tracks_from_playlist(playlist_id: str, set_video_ids: list[str]) -> s
 
 
 @mcp.tool()
+@log_tool_errors
 def reorder_playlist_track(
     playlist_id: str, set_video_id: str, before_set_video_id: str | None = None
 ) -> str:
@@ -326,7 +387,19 @@ def reorder_playlist_track(
     """
     yt = get_client()
     if before_set_video_id:
-        yt.edit_playlist(playlist_id, moveItem=(set_video_id, before_set_video_id))
+        last_error = None
+        for attempt in range(3):
+            try:
+                yt.edit_playlist(playlist_id, moveItem=(set_video_id, before_set_video_id))
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if "409" not in str(exc) or attempt == 2:
+                    raise
+                time.sleep(attempt + 1)
+        if last_error is not None:
+            raise last_error
         return f"Moved {set_video_id} before {before_set_video_id}"
     else:
         yt.edit_playlist(playlist_id, moveItem=set_video_id)
@@ -334,6 +407,7 @@ def reorder_playlist_track(
 
 
 @mcp.tool()
+@log_tool_errors
 def move_track_to_top(playlist_id: str, set_video_id: str) -> str:
     """Move a single track to the very top of the playlist."""
     yt = get_client()
@@ -349,6 +423,7 @@ def move_track_to_top(playlist_id: str, set_video_id: str) -> str:
 
 
 @mcp.tool()
+@log_tool_errors
 def move_track_to_bottom(playlist_id: str, set_video_id: str) -> str:
     """Move a single track to the very bottom of the playlist."""
     yt = get_client()

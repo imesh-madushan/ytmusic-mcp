@@ -72,6 +72,11 @@ Values already exported by the shell or supplied by systemd take precedence.
 nginx does not read dotenv files, so if you change `MCP_PORT` from `8787`,
 also change the port in `proxy_pass` in `nginx-ytmusic-mcp.conf`.
 
+Set `YTMUSIC_LOG_LEVEL=DEBUG` for detailed application diagnostics. Dependency
+protocol logs remain at `MCP_LIBRARY_LOG_LEVEL=INFO` by default so journald does
+not print raw SSE/JSON-RPC payloads. Tool failures are logged with tracebacks and
+are also returned to the MCP client as tool errors.
+
 ### 4.3 Run as a systemd service
 
 ```bash
@@ -162,6 +167,19 @@ the standard MCP OAuth discovery and authorization flow.
   `sudo systemctl restart ytmusic-mcp`.
 - `browser.json` can expire — re-run `setup_auth.py` (on your dev machine,
   then re-copy to the server) if calls start failing with auth errors.
+
+## Real-account integration tests
+
+The integration suite uses `browser.json` and performs real YouTube Music
+writes. It creates a uniquely named private playlist and deletes it during
+cleanup, including when a test fails. Run it explicitly with:
+
+```bash
+python3 -m pip install -r requirements-test.txt
+pytest --run-youtube-integration -v
+```
+
+Without `--run-youtube-integration`, these account-mutating tests are skipped.
 
 ---
 
