@@ -1,111 +1,162 @@
-# YouTube Music MCP Server
+# YouTube Music MCP Server (personal, single-user)
 
-An MCP server that wraps [`ytmusicapi`](https://github.com/sigma67/ytmusicapi) so an
-LLM client (Claude Desktop, Claude Code, etc.) can search YouTube Music and fully
-manage your playlists: create/delete, add/remove tracks, and reorder tracks
-(move to top, move to bottom, move before another track).
+An MCP server wrapping `ytmusicapi` so Claude (and optionally ChatGPT) can
+search YouTube Music and manage playlists: create/delete, add/remove tracks,
+reorder tracks (top/bottom/before another track).
 
-## 1. Install dependencies
+**Scope of this setup:** built for exactly one user (you), hosted on your
+own Ubuntu box, reachable only with a secret bearer token. Recommended to
+run against a **secondary Google account**, not your main one, since a
+leaked token means full playlist read/write access to whatever account is
+authenticated.
+
+---
+
+## 1. Install
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 2. Run the browser-cookie auth setup
+## 2. Auth against YouTube Music (secondary account)
+
+Log into your **secondary Gmail/YouTube account** in the browser you use for
+this, then run:
 
 ```bash
 python3 setup_auth.py
 ```
 
-It'll print step-by-step instructions: open music.youtube.com, open DevTools
-→ Network tab, click a request, copy the request headers, paste them in.
-This writes `browser.json` next to the script — that's what `server.py` reads.
+Follow the printed steps (DevTools → Network tab → copy request headers
+from a music.youtube.com request). This writes `browser.json`, which
+`server.py` reads automatically. Cookie-based auth can go stale — re-run
+this if tools start failing.
 
-Logs are written to stderr so they do not interfere with the MCP stdio protocol.
-Set `YTMUSIC_LOG_LEVEL` to `DEBUG`, `INFO`, `WARNING`, or `ERROR` (default: `INFO`).
+Paste the headers, then press Enter on one additional empty line. Firefox's
+structured request-header JSON export is also accepted. This project uses
+browser-cookie authentication only; OAuth credentials are rejected.
 
-This project intentionally supports browser-cookie authentication only. It
-does not accept OAuth client files or Google Cloud credentials. Copied headers
-can go stale if you sign out or the browser session expires; re-run
-`setup_auth.py` if `server.py` starts returning 401 errors.
-
-## 3. Try it standalone (optional sanity check)
+## 3. Local test (optional, before deploying)
 
 ```bash
-python3 -c "
-from server import get_client
-yt = get_client()
-print(yt.get_library_playlists(limit=5))
-"
+python3 -c "from server import get_client; print(get_client().get_library_playlists(limit=5))"
 ```
 
-## 4. Connect it to Claude Desktop / Claude Code
+---
 
-Add to your MCP config (e.g. `claude_desktop_config.json`):
+## 4. Deploy on your Ubuntu server
 
-```json
-{
-  "mcpServers": {
-    "youtube-music": {
-      "command": "python3",
-      "args": ["/absolute/path/to/ytmusic-mcp/server.py"]
-    }
-  }
-}
-```
-
-Restart the client. You should see the tools below available.
-
-## Run tests
+### 4.1 Copy the project over
 
 ```bash
-python -m unittest discover -s tests -v
+sudo mkdir -p /opt/ytmusic-mcp
+sudo cp server.py requirements.txt /opt/ytmusic-mcp/
+sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
+cd /opt/ytmusic-mcp
+sudo pip install -r requirements.txt --break-system-packages
 ```
 
-These tests mock YouTube Music and do not change your account.
+### 4.2 Configure
 
-## Test real search and playlist adding
-
-Run a read-only search against your account:
-
-```powershell
-.\.venv\Scripts\python.exe smoke_test.py "Daft Punk"
+```bash
+sudo cp .env.example /opt/ytmusic-mcp/.env
+openssl rand -hex 32                          # generate your token
+sudo nano /opt/ytmusic-mcp/.env               # paste it into MCP_BEARER_TOKEN
 ```
 
-To offer to add the first result, copy the playlist ID from its YouTube Music
-URL and run:
+Leave `MCP_HOST=127.0.0.1` — the app must never bind directly to the public
+interface. nginx is the only thing facing the internet.
 
-```powershell
-.\.venv\Scripts\python.exe smoke_test.py "Daft Punk Get Lucky" --add-first-to PLAYLIST_ID
+### 4.3 Run as a systemd service
+
+```bash
+sudo cp ytmusic-mcp.service /etc/systemd/system/
+sudo nano /etc/systemd/system/ytmusic-mcp.service   # set User= to your linux user
+sudo systemctl daemon-reload
+sudo systemctl enable --now ytmusic-mcp
+sudo systemctl status ytmusic-mcp
+journalctl -u ytmusic-mcp -f                        # tail logs
 ```
 
-The command displays the selected track and asks for confirmation before it
-changes the playlist. Add `--yes` only in automation where that mutation is
-already intended.
+### 4.4 nginx — only port 443, only path /mcp
 
-## Test through an MCP client
-
-Launch the official MCP Inspector from PowerShell:
-
-```powershell
-.\.venv\Scripts\mcp.exe dev server.py:mcp
+```bash
+sudo apt install nginx certbot python3-certbot-nginx
+sudo cp nginx-ytmusic-mcp.conf /etc/nginx/sites-available/ytmusic-mcp
+sudo nano /etc/nginx/sites-available/ytmusic-mcp    # replace mcp.yourdomain.com
+sudo ln -s /etc/nginx/sites-available/ytmusic-mcp /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+sudo certbot --nginx -d mcp.yourdomain.com          # gets the TLS cert, edits the config
 ```
 
-Open the Inspector URL printed in the terminal, connect, choose **Tools**, and
-first call `search_music` with arguments such as:
+You need a domain/subdomain pointed at your server's public IP (any DNS A
+record works), and ports 80+443 open in your firewall. Port 80 exists only
+to redirect to HTTPS and serve certbot's renewal challenge — nothing else
+is served there.
 
-```json
-{"query": "Daft Punk", "filter": "songs", "limit": 5}
+This config makes **only `/mcp` reachable**; every other path (`/`,
+`/admin`, `/.env`, etc.) returns a bare 404 before hitting your app at all.
+It also rate-limits requests (30/min, burst 10) to blunt brute-force/scan
+traffic.
+
+### 4.5 fail2ban — auto-ban repeat offenders
+
+```bash
+sudo apt install fail2ban
+sudo cp fail2ban-filter-ytmusic-mcp.conf /etc/fail2ban/filter.d/ytmusic-mcp.conf
+sudo cp fail2ban-jail-ytmusic-mcp.conf /etc/fail2ban/jail.d/ytmusic-mcp.conf
+sudo systemctl restart fail2ban
+sudo fail2ban-client status ytmusic-mcp     # confirm the jail is active
 ```
 
-Copy a returned `videoId`, then call `add_tracks_to_playlist`:
+Any IP racking up 5 unauthorized/probing requests in 10 minutes gets banned
+for 24h.
 
-```json
-{"playlist_id": "YOUR_PLAYLIST_ID", "video_ids": ["RETURNED_VIDEO_ID"]}
+### 4.6 Verify from outside
+
+```bash
+curl -i https://mcp.yourdomain.com/mcp      # expect 401 (reachable, but locked)
+curl -i https://mcp.yourdomain.com/anything # expect 404 (nothing else exposed)
 ```
 
-This is the closest local test to an AI client: the Inspector discovers the
-tool schemas and invokes them over MCP rather than calling Python directly.
+Your MCP endpoint: **`https://mcp.yourdomain.com/mcp`**
+
+---
+
+## 5. Connect from Claude.ai
+
+1. **Settings → Connectors → Add custom connector.**
+2. URL: `https://mcp.yourdomain.com/mcp`
+3. Advanced settings → add header: `Authorization: Bearer <your MCP_BEARER_TOKEN>`
+4. Save, then enable it in a conversation via **+ → Connectors**.
+
+## 6. Connect from ChatGPT
+
+ChatGPT's remote-connector/custom-header support has been shifting between
+plan tiers and connector types — worth checking OpenAI's current docs for
+the exact click path when you get there. The server side doesn't change:
+it's a standard endpoint at `https://mcp.yourdomain.com/mcp` expecting
+`Authorization: Bearer <token>`. If their UI doesn't support custom headers
+for a given connector type, that combination just won't work until it does
+— nothing to fix on your end in that case.
+
+---
+
+## Security summary
+
+- Token is the only thing standing between the internet and your YouTube
+  account (via `browser.json`) — treat it like a root password.
+- App binds `127.0.0.1` only; nginx is the sole public-facing surface, and
+  only exposes `/mcp` on `:443`.
+- Rate limiting + fail2ban blunt scanning/brute-force attempts.
+- Using a secondary Google account caps the blast radius of a leak to that
+  account's playlists, not your main one.
+- Rotate the token any time you suspect exposure: regenerate, update `.env`,
+  `sudo systemctl restart ytmusic-mcp`.
+- `browser.json` can expire — re-run `setup_auth.py` (on your dev machine,
+  then re-copy to the server) if calls start failing with auth errors.
+
+---
 
 ## Tools exposed
 
@@ -123,16 +174,8 @@ tool schemas and invokes them over MCP rather than calling Python directly.
 | `move_track_to_top` | Move a track to position 1 |
 | `move_track_to_bottom` | Move a track to the last position |
 
-## Notes on IDs
-
-- **`videoId`**: identifies a song/video itself (from `search_music`). Used to *add* tracks.
-- **`setVideoId`**: identifies one specific occurrence of a track *inside a playlist*
-  (from `get_playlist`). Used to *remove* or *reorder* tracks, since the same song
-  could appear twice in a playlist with two different `setVideoId`s.
-
-## Extending it
-
-`ytmusicapi` covers a lot more than playlists — liking songs, library
-management, uploads, podcasts, radio/queue generation, artist/album browsing.
-Any of its methods can be wrapped the same way: add a new `@mcp.tool()`
-function in `server.py` that calls the corresponding `yt.<method>(...)`.
+**ID note:** `videoId` identifies a song (used to *add*); `setVideoId`
+identifies one occurrence of a track *inside a playlist* (used to *remove*
+or *reorder*, since the same song can appear twice with different
+setVideoIds). You never need to look these up manually — ask by song name
+and the assistant calls `get_playlist` first to resolve the right ID.

@@ -1,40 +1,30 @@
-"""
-One-time browser-cookie auth setup for the YouTube Music MCP server.
+"""Create browser-cookie credentials for the YouTube Music MCP server.
+
 OAuth and Google Cloud credentials are intentionally not supported.
-
-Usage:
-    python3 setup_auth.py
-
-Follow the printed instructions to copy a request header from your browser's
-devtools. This writes browser.json next to this script. server.py reads that
-file automatically.
-
-These credentials can expire or be invalidated if you sign out, so re-run
-this script if authenticated requests begin returning 401 errors.
 """
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
 from ytmusicapi import setup
 
-from logging_config import configure_logging
-
 LOGGER = logging.getLogger(__name__)
-AUTH_FILE = Path(__file__).resolve().with_name("browser.json")
+DEFAULT_AUTH_FILE = Path(__file__).resolve().with_name("browser.json")
+AUTH_FILE = Path(os.environ.get("YTMUSIC_AUTH_FILE", DEFAULT_AUTH_FILE)).resolve()
 
 
 def normalize_headers(raw: str) -> str:
-    """Convert Firefox's structured request-header JSON to header lines."""
+    """Convert Firefox structured header exports to normal header lines."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        # Some Firefox exports contain an unquoted Cookie value, making the
-        # otherwise JSON-shaped clipboard text invalid JSON.
-        converted = []
-        pending_name = None
+        # Firefox can export an otherwise JSON-shaped block with an unquoted
+        # Cookie value. Parse that variant without ever logging its contents.
+        converted: list[str] = []
+        pending_name: str | None = None
         for line in raw.splitlines():
             name_match = re.search(r'"name"\s*:\s*"([^"]+)"', line)
             if name_match:
@@ -54,7 +44,6 @@ def normalize_headers(raw: str) -> str:
     headers = data.get("requestHeaders", {}).get("headers", [])
     if not isinstance(headers, list):
         return raw
-
     converted = [
         f"{header['name']}: {header['value']}"
         for header in headers
@@ -62,9 +51,10 @@ def normalize_headers(raw: str) -> str:
     ]
     return "\n".join(converted) if converted else raw
 
+
 def read_pasted_headers() -> str:
-    """Read pasted headers until the user submits an empty line."""
-    lines = []
+    """Read pasted headers until an empty line or terminal EOF."""
+    lines: list[str] = []
     while True:
         try:
             line = input()
@@ -77,10 +67,13 @@ def read_pasted_headers() -> str:
 
 
 def main() -> int:
-    configure_logging()
+    logging.basicConfig(
+        level=os.environ.get("YTMUSIC_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     print(
         "\nSteps:\n"
-        "  1. Open music.youtube.com and make sure you're logged in.\n"
+        "  1. Open music.youtube.com and make sure you are logged in.\n"
         "  2. Open DevTools (F12) -> Network, then reload the page.\n"
         "  3. Select a music.youtube.com/youtubei/v1/browse request.\n"
         "  4. Copy all request headers and paste them below.\n"
@@ -92,15 +85,16 @@ def main() -> int:
         LOGGER.error("No headers entered; auth file was not created")
         return 1
 
-    LOGGER.info("Validating authentication headers")
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    LOGGER.info("Validating browser-cookie authentication headers")
     try:
         setup(filepath=str(AUTH_FILE), headers_raw=normalize_headers(raw))
     except Exception:
-        LOGGER.exception("Authentication setup failed (header values were not logged)")
+        LOGGER.exception("Authentication setup failed (secret values were not logged)")
         return 1
 
-    LOGGER.info("Authentication file saved to %s", AUTH_FILE)
-    print("\nDone! You can now run: python server.py")
+    LOGGER.info("Browser-cookie credentials saved to %s", AUTH_FILE)
+    print("Done. Copy browser.json to the deployment server when required.")
     return 0
 
 

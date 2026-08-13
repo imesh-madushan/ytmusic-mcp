@@ -6,12 +6,15 @@ search, create/delete playlists, list playlists, view a playlist,
 add tracks, remove tracks, and reorder tracks (move to top/bottom/
 before another track).
 
-Auth: reads browser.json (created via `python setup_auth.py`, using the
-browser-cookie method) from the same directory. OAuth is not supported.
+Auth: reads browser.json (created via `python3 setup_auth.py`, using the
+free browser-cookie method) from the same directory, or from the path in
+the YTMUSIC_AUTH_FILE env var.
 """
 
 import json
 import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -19,12 +22,17 @@ from mcp.server.mcpserver import MCPServer
 from ytmusicapi import YTMusic
 from ytmusicapi.helpers import get_authorization, sapisid_from_cookie
 
-from logging_config import configure_logging
-
-configure_logging()
+logging.basicConfig(
+    level=os.environ.get("YTMUSIC_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stderr,
+)
 LOGGER = logging.getLogger(__name__)
 
-AUTH_FILE = Path(__file__).resolve().with_name("browser.json")
+AUTH_FILE = Path(os.environ.get(
+    "YTMUSIC_AUTH_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser.json"),
+)).resolve()
 
 mcp = MCPServer("youtube-music")
 
@@ -32,43 +40,35 @@ _yt: YTMusic | None = None
 
 
 def load_browser_auth(auth_file: Path = AUTH_FILE) -> dict[str, Any]:
-    """Load cookie headers and add the browser authorization hash in memory."""
+    """Load cookie headers and add ytmusicapi's browser-auth hash in memory."""
     try:
         headers = json.loads(auth_file.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        LOGGER.error("Browser authentication file not found: %s", auth_file)
         raise RuntimeError(
             f"No browser-cookie auth file found at {auth_file}. "
-            "Run `python setup_auth.py` first."
+            "Run `python3 setup_auth.py` first."
         ) from exc
     except (OSError, json.JSONDecodeError) as exc:
-        LOGGER.error("Browser authentication file is unreadable or invalid JSON")
-        raise RuntimeError("browser.json is invalid; run `python setup_auth.py` again.") from exc
+        raise RuntimeError("browser.json is unreadable or invalid JSON.") from exc
 
     keys = {str(key).lower() for key in headers} if isinstance(headers, dict) else set()
-    missing = {"cookie", "x-goog-authuser"} - keys
-    if missing:
-        LOGGER.error("Auth file is not a browser-cookie header file")
+    if {"cookie", "x-goog-authuser"} - keys:
         raise RuntimeError(
-            "browser.json does not contain browser-cookie authentication. "
-            "OAuth files are not supported; run `python setup_auth.py`."
+            "The auth file is not browser-cookie credentials. OAuth is not supported; "
+            "run `python3 setup_auth.py`."
         )
-
     origin = headers.get("origin") or headers.get("x-origin")
     if not origin:
-        raise RuntimeError(
-            "browser.json is missing the Origin header; run `python setup_auth.py` again."
-        )
+        raise RuntimeError("browser.json is missing the Origin header; capture a /browse request.")
     try:
         sapisid = sapisid_from_cookie(headers["cookie"])
     except (KeyError, ValueError) as exc:
         raise RuntimeError(
-            "The browser cookie is missing __Secure-3PAPISID; capture headers "
-            "from a logged-in /browse request."
+            "The cookie is missing __Secure-3PAPISID; capture headers from a logged-in /browse request."
         ) from exc
 
-    # ytmusicapi 1.12.x uses this header to classify the credentials as
-    # browser auth. It refreshes the timestamped hash for later requests.
+    # ytmusicapi 1.12.x needs this to classify the input as browser auth.
+    # It is derived from the cookie in memory; no OAuth credentials are used.
     headers["authorization"] = get_authorization(f"{sapisid} {origin}")
     return headers
 
@@ -79,7 +79,7 @@ def get_client() -> YTMusic:
     global _yt
     if _yt is None:
         headers = load_browser_auth()
-        LOGGER.info("Initializing YouTube Music client")
+        LOGGER.info("Initializing YouTube Music client with browser-cookie authentication")
         _yt = YTMusic(headers)
         LOGGER.info("YouTube Music client initialized")
     return _yt
@@ -293,5 +293,44 @@ def move_track_to_bottom(playlist_id: str, set_video_id: str) -> str:
 
 
 if __name__ == "__main__":
-    LOGGER.info("Starting YouTube Music MCP server with stdio transport")
-    mcp.run(transport="stdio")
+    transport = os.environ.get("MCP_TRANSPORT", "stdio")
+
+    if transport == "http":
+        # --- Remote hosting mode -------------------------------------------------
+        # Serves the server over Streamable HTTP (what Claude/ChatGPT custom
+        # connectors speak) at http://HOST:PORT/mcp, protected by a bearer token.
+        import uvicorn
+        from starlette.applications import Starlette
+        from starlette.middleware.base import BaseHTTPMiddleware
+        from starlette.responses import JSONResponse
+        from starlette.requests import Request
+
+        SERVER_TOKEN = os.environ.get("MCP_BEARER_TOKEN")
+        if not SERVER_TOKEN:
+            sys.exit(
+                "MCP_BEARER_TOKEN is not set. Generate one (e.g. `openssl rand -hex 32`) "
+                "and export it before running in http mode."
+            )
+
+        class BearerAuthMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next):
+                auth = request.headers.get("authorization", "")
+                if auth != f"Bearer {SERVER_TOKEN}":
+                    return JSONResponse({"error": "unauthorized"}, status_code=401)
+                return await call_next(request)
+
+        host = os.environ.get("MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("MCP_PORT", "8787"))
+
+        app: Starlette = mcp.streamable_http_app(host=host)
+        app.add_middleware(BearerAuthMiddleware)
+
+        LOGGER.info(
+            "Serving MCP over Streamable HTTP on http://%s:%s/mcp (bearer-token protected)",
+            host,
+            port,
+        )
+        uvicorn.run(app, host=host, port=port)
+    else:
+        # --- Local mode (Claude Desktop config launches this directly) -----------
+        mcp.run(transport="stdio")
