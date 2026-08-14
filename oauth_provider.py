@@ -2,12 +2,14 @@
 
 The MCP SDK owns protocol validation, client authentication, PKCE verification,
 metadata, and endpoint responses. This provider supplies the resource-owner
-login and stores short-lived authorization state and tokens in memory.
+login, keeps short-lived authorization state in memory, and persists registered
+clients and issued tokens in SQLite.
 """
 
 import html
 import secrets
 import time
+from pathlib import Path
 
 from pydantic import AnyUrl
 from starlette.exceptions import HTTPException
@@ -23,6 +25,7 @@ from mcp.server.auth.provider import (
     construct_redirect_uri,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from oauth_store import SQLiteOAuthStore
 
 
 class ResourceRefreshToken(RefreshToken):
@@ -36,21 +39,22 @@ class PasswordOAuthProvider(
 ):
     """OAuth provider backed by one configured resource-owner login."""
 
-    def __init__(self, issuer_url: str, username: str, password: str, scope: str):
+    def __init__(
+        self, issuer_url: str, username: str, password: str, scope: str, database_path: Path
+    ):
         self.issuer_url = issuer_url.rstrip("/")
         self.username = username
         self.password = password
         self.scope = scope
-        self.clients: dict[str, OAuthClientInformationFull] = {}
+        self.store = SQLiteOAuthStore(database_path)
+        self.store.delete_expired_tokens()
         self.auth_codes: dict[str, AuthorizationCode] = {}
-        self.access_tokens: dict[str, AccessToken] = {}
-        self.refresh_tokens: dict[str, ResourceRefreshToken] = {}
         self.pending: dict[str, AuthorizationParams] = {}
         self.pending_clients: dict[str, str] = {}
 
     def add_static_client(self, client_id: str, client_secret: str, redirect_uris: list[str]) -> None:
         """Register a confidential client configured by the server owner."""
-        self.clients[client_id] = OAuthClientInformationFull(
+        self.store.save_client(OAuthClientInformationFull(
             client_id=client_id,
             client_secret=client_secret,
             redirect_uris=[AnyUrl(uri) for uri in redirect_uris],
@@ -60,13 +64,13 @@ class PasswordOAuthProvider(
             scope=self.scope,
             client_name="Claude",
             application_type="web",
-        )
+        ))
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self.clients.get(client_id)
+        return self.store.get_client(client_id)
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        self.clients[client_info.client_id] = client_info
+        self.store.save_client(client_info)
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         login_state = secrets.token_urlsafe(32)
@@ -136,10 +140,12 @@ button{{margin-top:1.25rem;padding:.7rem 1rem}}</style></head>
             return None
         return code
 
-    def _issue_tokens(self, client_id: str, scopes: list[str], resource: str | None, subject: str | None) -> OAuthToken:
+    def _new_tokens(
+        self, client_id: str, scopes: list[str], resource: str | None, subject: str | None
+    ) -> tuple[AccessToken, ResourceRefreshToken, OAuthToken]:
         access_value = secrets.token_urlsafe(48)
         refresh_value = secrets.token_urlsafe(48)
-        self.access_tokens[access_value] = AccessToken(
+        access_token = AccessToken(
             token=access_value,
             client_id=client_id,
             scopes=scopes,
@@ -147,7 +153,7 @@ button{{margin-top:1.25rem;padding:.7rem 1rem}}</style></head>
             resource=resource,
             subject=subject,
         )
-        self.refresh_tokens[refresh_value] = ResourceRefreshToken(
+        refresh_token = ResourceRefreshToken(
             token=refresh_value,
             client_id=client_id,
             scopes=scopes,
@@ -155,13 +161,23 @@ button{{margin-top:1.25rem;padding:.7rem 1rem}}</style></head>
             subject=subject,
             resource=resource,
         )
-        return OAuthToken(
+        response = OAuthToken(
             access_token=access_value,
             refresh_token=refresh_value,
             token_type="Bearer",
             expires_in=3600,
             scope=" ".join(scopes),
         )
+        return access_token, refresh_token, response
+
+    def _issue_tokens(
+        self, client_id: str, scopes: list[str], resource: str | None, subject: str | None
+    ) -> OAuthToken:
+        access_token, refresh_token, response = self._new_tokens(
+            client_id, scopes, resource, subject
+        )
+        self.store.save_tokens(access_token, refresh_token)
+        return response
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
@@ -175,34 +191,29 @@ button{{margin-top:1.25rem;padding:.7rem 1rem}}</style></head>
         )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        access = self.access_tokens.get(token)
-        if access is not None and access.expires_at is not None and access.expires_at < time.time():
-            self.access_tokens.pop(token, None)
-            return None
-        return access
+        return self.store.get_access_token(token)
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> ResourceRefreshToken | None:
-        token = self.refresh_tokens.get(refresh_token)
+        token = self.store.get_refresh_token(refresh_token, ResourceRefreshToken)
         if token is None or token.client_id != client.client_id:
-            return None
-        if token.expires_at is not None and token.expires_at < time.time():
-            self.refresh_tokens.pop(refresh_token, None)
             return None
         return token
 
     async def exchange_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: ResourceRefreshToken, scopes: list[str]
     ) -> OAuthToken:
-        self.refresh_tokens.pop(refresh_token.token, None)
         requested = scopes or refresh_token.scopes
         if not set(requested).issubset(refresh_token.scopes):
             raise ValueError("Requested scope exceeds the original grant")
-        return self._issue_tokens(
+        access_token, replacement_refresh, response = self._new_tokens(
             client.client_id, requested, refresh_token.resource, refresh_token.subject
         )
+        self.store.rotate_refresh_token(
+            refresh_token.token, access_token, replacement_refresh
+        )
+        return response
 
     async def revoke_token(self, token: AccessToken | ResourceRefreshToken) -> None:
-        self.access_tokens.pop(token.token, None)
-        self.refresh_tokens.pop(token.token, None)
+        self.store.revoke_token(token.token)

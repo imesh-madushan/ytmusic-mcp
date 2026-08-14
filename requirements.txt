@@ -1,4 +1,9 @@
+# NOTE: mcp is pinned below v2 because mcp-ui-server (added for the MCP-UI
+# widget work) is currently incompatible with mcp==2.0.0's pydantic models.
+# server.py uses FastMCP (not the newer MCPServer class) to match this pin.
+# Re-test both together before ever bumping this.
 ytmusicapi>=1.12.0
-mcp[cli]>=2.0.0
+mcp[cli]>=1.29.0,<2.0.0
+mcp-ui-server>=1.0.0
 python-dotenv>=1.0.0
 python-multipart>=0.0.9

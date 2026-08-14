@@ -9,6 +9,10 @@ before another track).
 Auth: reads browser.json (created via `python3 setup_auth.py`, using the
 free browser-cookie method) from the same directory, or from the path in
 the YTMUSIC_AUTH_FILE env var.
+
+Built on FastMCP (mcp<2.0.0), not the newer MCPServer class, because
+mcp-ui-server (used for MCP-UI widget tools) is not yet compatible with
+mcp==2.0.0. See requirements.txt for details.
 """
 
 import json
@@ -21,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from mcp.server.mcpserver import MCPServer
+from mcp.server.fastmcp import FastMCP
 from ytmusicapi import YTMusic
 from ytmusicapi.helpers import get_authorization, sapisid_from_cookie
 
@@ -60,7 +64,12 @@ if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
     if not public_url or not oauth_username or not oauth_password:
         sys.exit("MCP_PUBLIC_URL, OAUTH_USERNAME, and OAUTH_PASSWORD are required in HTTP mode")
     issuer_url = public_url.rsplit("/", 1)[0]
-    OAUTH_PROVIDER = PasswordOAuthProvider(issuer_url, oauth_username, oauth_password, "ytmusic")
+    oauth_database = Path(
+        os.environ.get("OAUTH_DB_PATH", str(Path(__file__).resolve().with_name("oauth.sqlite3")))
+    )
+    OAUTH_PROVIDER = PasswordOAuthProvider(
+        issuer_url, oauth_username, oauth_password, "ytmusic", oauth_database
+    )
     static_client_id = os.environ.get("OAUTH_CLIENT_ID", "")
     static_client_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
     static_redirect_uris = [
@@ -77,8 +86,10 @@ if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
         OAUTH_PROVIDER.add_static_client(
             static_client_id, static_client_secret, static_redirect_uris
         )
-    mcp = MCPServer(
+    mcp = FastMCP(
         "youtube-music",
+        host=os.environ.get("MCP_HOST", "127.0.0.1"),
+        port=int(os.environ.get("MCP_PORT", "8787")),
         auth_server_provider=OAUTH_PROVIDER,
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(issuer_url),
@@ -93,7 +104,7 @@ if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
         ),
     )
 else:
-    mcp = MCPServer("youtube-music")
+    mcp = FastMCP("youtube-music")
 
 
 if OAUTH_PROVIDER is not None:
@@ -440,10 +451,13 @@ if __name__ == "__main__":
         # connectors speak) at http://HOST:PORT/mcp, protected by OAuth.
         import uvicorn
         from starlette.applications import Starlette
+
         host = os.environ.get("MCP_HOST", "127.0.0.1")
         port = int(os.environ.get("MCP_PORT", "8787"))
 
-        app: Starlette = mcp.streamable_http_app(host=host)
+        # FastMCP takes host/port at construction time (set above), and
+        # streamable_http_app() takes no arguments in this SDK version.
+        app: Starlette = mcp.streamable_http_app()
 
         LOGGER.info(
             "Serving MCP over Streamable HTTP on http://%s:%s/mcp (OAuth protected)",

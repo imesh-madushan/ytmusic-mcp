@@ -50,8 +50,10 @@ python3 -c "from server import get_client; print(get_client().get_library_playli
 
 ```bash
 sudo mkdir -p /opt/ytmusic-mcp
-sudo cp server.py oauth_provider.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
+sudo cp server.py oauth_provider.py oauth_store.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
 sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
+sudo mkdir -p /home/ubuntu/prj/ytmusic-mcp/data
+sudo chown ubuntu:ubuntu /home/ubuntu/prj/ytmusic-mcp/data  # use the service User/Group
 cd /opt/ytmusic-mcp
 sudo pip install -r requirements.txt --break-system-packages
 ```
@@ -69,6 +71,11 @@ interface. nginx is the only thing facing the internet.
 
 Both direct Python runs and the systemd unit load this same `.env` file.
 Values already exported by the shell or supplied by systemd take precedence.
+
+`OAUTH_DB_PATH` stores dynamically registered clients and issued access/refresh
+tokens. Keep it on persistent local storage in a directory writable only by the
+service user. Restarting or upgrading the service will then preserve connector
+registrations and active sessions.
 nginx does not read dotenv files, so if you change `MCP_PORT` from `8787`,
 also change the port in `proxy_pass` in `nginx-ytmusic-mcp.conf`.
 
@@ -164,7 +171,13 @@ the standard MCP OAuth discovery and authorization flow.
 - Using a secondary Google account caps the blast radius of a leak to that
   account's playlists, not your main one.
 - Rotate the OAuth password any time you suspect exposure: regenerate, update `.env`,
-  `sudo systemctl restart ytmusic-mcp`.
+  `sudo systemctl restart ytmusic-mcp`. Rotating this login password does not revoke already issued OAuth tokens.
+- To sign out every connector after a compromise, stop the service, move or delete
+  the file configured by `OAUTH_DB_PATH`, and restart. This reset is destructive;
+  every client must register and authorize again.
+- Back up the OAuth database if preserving connector registrations across server
+  migrations matters. Treat the backup as a secret because registered client
+  credentials are stored in it.
 - `browser.json` can expire — re-run `setup_auth.py` (on your dev machine,
   then re-copy to the server) if calls start failing with auth errors.
 
