@@ -32,6 +32,8 @@ htmlcov/
 # Build and package artifacts
 build/
 dist/
+!widgets/playlist-manager/dist/
+!widgets/playlist-manager/dist/index.html
 *.egg-info/
 .eggs/
 

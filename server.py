@@ -10,9 +10,7 @@ Auth: reads browser.json (created via `python3 setup_auth.py`, using the
 free browser-cookie method) from the same directory, or from the path in
 the YTMUSIC_AUTH_FILE env var.
 
-Built on FastMCP (mcp<2.0.0), not the newer MCPServer class, because
-mcp-ui-server (used for MCP-UI widget tools) is not yet compatible with
-mcp==2.0.0. See requirements.txt for details.
+Built on FastMCP and the standard MCP Apps resource protocol.
 """
 
 import json
@@ -20,7 +18,7 @@ import logging
 import os
 import sys
 import time
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any
 
@@ -30,14 +28,6 @@ from mcp.types import CallToolResult, TextContent
 from ytmusicapi import YTMusic
 from ytmusicapi.helpers import get_authorization, sapisid_from_cookie
 
-from playlist_ui import (
-    MCP_APP_MIME_TYPE,
-    OPENAI_WIDGET_MIME_TYPE,
-    PLAYLIST_APP_URI,
-    PLAYLIST_OPENAI_URI,
-    create_playlist_tracks_ui,
-    playlist_tracks_html,
-)
 
 # Apply the project configuration to direct runs as well as systemd launches.
 # Existing process/systemd variables take precedence over values in the file.
@@ -61,6 +51,22 @@ AUTH_FILE = Path(os.environ.get(
     "YTMUSIC_AUTH_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser.json"),
 )).resolve()
+
+PLAYLIST_APP_URI = "ui://ytmusic/playlist-tracks"
+PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-tracks-openai"
+MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
+OPENAI_WIDGET_MIME_TYPE = "text/html+skybridge"
+WIDGET_PATH = Path(__file__).resolve().parent / "widgets" / "playlist-manager" / "dist" / "index.html"
+
+@lru_cache(maxsize=1)
+def playlist_manager_html() -> str:
+    """Load the compiled, self-contained React MCP App."""
+    try:
+        return WIDGET_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            "Playlist manager is not built. Run `npm run build` in widgets/playlist-manager."
+        ) from exc
 
 OAUTH_PROVIDER = None
 if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
@@ -123,11 +129,16 @@ else:
     description="Interactive ordered playlist track browser",
     mime_type=MCP_APP_MIME_TYPE,
     meta={
-        "ui": {"prefersBorder": True}
+        "ui": {
+            "prefersBorder": True,
+            "csp": {"resourceDomains": [
+                "https://i.ytimg.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+            ]},
+        }
     },
 )
 def playlist_tracks_app_resource() -> str:
-    return playlist_tracks_html()
+    return playlist_manager_html()
 
 
 @mcp.resource(
@@ -136,12 +147,15 @@ def playlist_tracks_app_resource() -> str:
     description="Interactive ordered playlist track browser",
     mime_type=OPENAI_WIDGET_MIME_TYPE,
     meta={
-        "openai/widgetDescription": "Browse and filter the ordered tracks in a YouTube Music playlist.",
+        "openai/widgetDescription": "Manage YouTube Music playlists, tracks, search, and ordering.",
         "openai/widgetPrefersBorder": True,
+        "openai/widgetCSP": {"resource_domains": [
+            "https://i.ytimg.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+        ]},
     },
 )
 def playlist_tracks_openai_resource() -> str:
-    return playlist_tracks_html()
+    return playlist_manager_html()
 
 
 if OAUTH_PROVIDER is not None:
@@ -219,6 +233,23 @@ def get_client() -> YTMusic:
     return _yt
 
 
+def _thumbnail_url(item: dict[str, Any], target_width: int = 120) -> str | None:
+    """Return a predictable small image URL accepted by connector CSPs."""
+    if item.get("videoId"):
+        return f"https://i.ytimg.com/vi/{item['videoId']}/default.jpg"
+    candidates = [thumb for thumb in item.get("thumbnails") or [] if thumb.get("url")]
+    if not candidates:
+        return None
+    with_width = [thumb for thumb in candidates if isinstance(thumb.get("width"), int)]
+    if not with_width:
+        return candidates[0]["url"]
+    large_enough = [thumb for thumb in with_width if thumb["width"] >= target_width]
+    chosen = min(large_enough, key=lambda thumb: thumb["width"]) if large_enough else max(
+        with_width, key=lambda thumb: thumb["width"]
+    )
+    return chosen["url"]
+
+
 def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
     artists = ", ".join(a.get("name", "") for a in track.get("artists") or [])
     return {
@@ -228,6 +259,7 @@ def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
         "artists": artists,
         "album": (track.get("album") or {}).get("name"),
         "duration": track.get("duration"),
+        "thumbnail": _thumbnail_url(track),
     }
 
 
@@ -257,6 +289,7 @@ def search_music(query: str, filter: str = "songs", limit: int = 10) -> list[dic
                 "title": r.get("title"),
                 "artists": ", ".join(a.get("name", "") for a in r.get("artists") or []),
                 "duration": r.get("duration"),
+                "thumbnail": _thumbnail_url(r),
             }
         )
     return out
@@ -327,11 +360,34 @@ def get_playlist(playlist_id: str, limit: int = 200) -> dict[str, Any]:
     }
 
 
+_MANAGER_TOOL_META = {
+    "ui": {"resourceUri": PLAYLIST_APP_URI, "visibility": ["model"]},
+    "ui/resourceUri": PLAYLIST_APP_URI,
+    "openai/outputTemplate": PLAYLIST_OPENAI_URI,
+    "openai/toolInvocation/invoking": "Opening music manager…",
+    "openai/toolInvocation/invoked": "Music manager ready",
+}
+
+
+@mcp.tool(meta=_MANAGER_TOOL_META)
+@log_tool_errors
+def open_music_manager_ui(limit: int = 100) -> CallToolResult:
+    """Open the complete YouTube Music playlist manager UI."""
+    data = {"view": "manager", "playlists": list_my_playlists(limit=limit)}
+    return CallToolResult(
+        content=[
+            TextContent(
+                type="text",
+                text=f"Opened playlist manager with {len(data['playlists'])} playlists.",
+            ),
+        ],
+        structuredContent=data,
+    )
+
+
 @mcp.tool(
     meta={
-        "ui": {"resourceUri": PLAYLIST_APP_URI, "visibility": ["model"]},
-        "ui/resourceUri": PLAYLIST_APP_URI,
-        "openai/outputTemplate": PLAYLIST_OPENAI_URI,
+        **_MANAGER_TOOL_META,
         "openai/toolInvocation/invoking": "Loading playlist…",
         "openai/toolInvocation/invoked": "Playlist ready",
     }
@@ -344,14 +400,13 @@ def get_playlist_tracks_ui(playlist_id: str, limit: int = 200) -> CallToolResult
     YouTube Music links. Other clients still receive text and structured data.
     """
     playlist = get_playlist(playlist_id, limit=limit)
-    ui_resource = create_playlist_tracks_ui(playlist)
     track_count = len(playlist["tracks"])
     summary = (
         f"Playlist {playlist['title'] or playlist_id}: "
         f"{track_count} track{'' if track_count == 1 else 's'}."
     )
     return CallToolResult(
-        content=[TextContent(type="text", text=summary), ui_resource],
+        content=[TextContent(type="text", text=summary)],
         structuredContent=playlist,
     )
 
