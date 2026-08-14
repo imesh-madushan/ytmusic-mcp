@@ -2,7 +2,8 @@
 
 An MCP server wrapping `ytmusicapi` so Claude (and optionally ChatGPT) can
 search YouTube Music and manage playlists: create/delete, add/remove tracks,
-reorder tracks (top/bottom/before another track).
+reorder tracks (top/bottom/before another track). UI-capable MCP clients can
+also render a responsive, fast, filterable playlist track browser.
 
 **Scope of this setup:** built for exactly one user (you), hosted on your
 own Ubuntu box, protected by an OAuth 2.1 login. Recommended to
@@ -36,6 +37,16 @@ Paste the headers, then press Enter on one additional empty line. Firefox's
 structured request-header JSON export is also accepted. This project uses
 browser-cookie authentication only; OAuth credentials are rejected.
 
+## Playlist tracks UI
+
+Call `get_playlist_tracks_ui` with a playlist ID to render the ordered track
+list. The tool advertises the standard MCP Apps resource metadata used by modern
+hosts, the legacy MCP-UI embedded-resource format, and ChatGPT Apps compatibility
+metadata. It includes artist/album metadata, a local filter, and links
+to YouTube Music. Hosts without UI support receive a text summary and the
+complete structured playlist data instead. After changing UI metadata, restart
+the service and reconnect the connector so the host refreshes `tools/list`.
+
 ## 3. Local test (optional, before deploying)
 
 ```bash
@@ -50,7 +61,7 @@ python3 -c "from server import get_client; print(get_client().get_library_playli
 
 ```bash
 sudo mkdir -p /opt/ytmusic-mcp
-sudo cp server.py oauth_provider.py oauth_store.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
+sudo cp server.py oauth_provider.py oauth_store.py playlist_ui.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
 sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
 sudo mkdir -p /home/ubuntu/prj/ytmusic-mcp/data
 sudo chown ubuntu:ubuntu /home/ubuntu/prj/ytmusic-mcp/data  # use the service User/Group

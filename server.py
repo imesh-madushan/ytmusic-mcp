@@ -26,8 +26,18 @@ from typing import Any
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 from ytmusicapi import YTMusic
 from ytmusicapi.helpers import get_authorization, sapisid_from_cookie
+
+from playlist_ui import (
+    MCP_APP_MIME_TYPE,
+    OPENAI_WIDGET_MIME_TYPE,
+    PLAYLIST_APP_URI,
+    PLAYLIST_OPENAI_URI,
+    create_playlist_tracks_ui,
+    playlist_tracks_html,
+)
 
 # Apply the project configuration to direct runs as well as systemd launches.
 # Existing process/systemd variables take precedence over values in the file.
@@ -105,6 +115,33 @@ if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
     )
 else:
     mcp = FastMCP("youtube-music")
+
+
+@mcp.resource(
+    PLAYLIST_APP_URI,
+    name="YouTube Music playlist tracks",
+    description="Interactive ordered playlist track browser",
+    mime_type=MCP_APP_MIME_TYPE,
+    meta={
+        "ui": {"prefersBorder": True}
+    },
+)
+def playlist_tracks_app_resource() -> str:
+    return playlist_tracks_html()
+
+
+@mcp.resource(
+    PLAYLIST_OPENAI_URI,
+    name="YouTube Music playlist tracks (ChatGPT compatibility)",
+    description="Interactive ordered playlist track browser",
+    mime_type=OPENAI_WIDGET_MIME_TYPE,
+    meta={
+        "openai/widgetDescription": "Browse and filter the ordered tracks in a YouTube Music playlist.",
+        "openai/widgetPrefersBorder": True,
+    },
+)
+def playlist_tracks_openai_resource() -> str:
+    return playlist_tracks_html()
 
 
 if OAUTH_PROVIDER is not None:
@@ -288,6 +325,35 @@ def get_playlist(playlist_id: str, limit: int = 200) -> dict[str, Any]:
         "trackCount": pl.get("trackCount"),
         "tracks": [_track_summary(t) for t in pl.get("tracks", [])],
     }
+
+
+@mcp.tool(
+    meta={
+        "ui": {"resourceUri": PLAYLIST_APP_URI, "visibility": ["model"]},
+        "ui/resourceUri": PLAYLIST_APP_URI,
+        "openai/outputTemplate": PLAYLIST_OPENAI_URI,
+        "openai/toolInvocation/invoking": "Loading playlist…",
+        "openai/toolInvocation/invoked": "Playlist ready",
+    }
+)
+@log_tool_errors
+def get_playlist_tracks_ui(playlist_id: str, limit: int = 200) -> CallToolResult:
+    """Show a playlist as an interactive track-list UI.
+
+    UI-capable clients render a fast, compact track list with metadata, filtering, and
+    YouTube Music links. Other clients still receive text and structured data.
+    """
+    playlist = get_playlist(playlist_id, limit=limit)
+    ui_resource = create_playlist_tracks_ui(playlist)
+    track_count = len(playlist["tracks"])
+    summary = (
+        f"Playlist {playlist['title'] or playlist_id}: "
+        f"{track_count} track{'' if track_count == 1 else 's'}."
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text=summary), ui_resource],
+        structuredContent=playlist,
+    )
 
 
 @mcp.tool()
