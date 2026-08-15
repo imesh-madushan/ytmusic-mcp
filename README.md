@@ -50,6 +50,9 @@ visible rows. To change the app, work in `widgets/playlist-manager`, run
 `npm run build`, and commit `dist/index.html`. Restart the service and reconnect
 the connector after UI/tool metadata changes so the host refreshes `tools/list`.
 
+The OAuth sign-in page is a self-contained React app too. To change it, work in
+`widgets/oauth-login`, run `npm run build`, and commit `dist/index.html`.
+
 ## 3. Local test (optional, before deploying)
 
 ```bash
@@ -67,6 +70,8 @@ sudo mkdir -p /opt/ytmusic-mcp
 sudo cp server.py oauth_provider.py oauth_store.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
 sudo mkdir -p /opt/ytmusic-mcp/widgets/playlist-manager/dist
 sudo cp widgets/playlist-manager/dist/index.html /opt/ytmusic-mcp/widgets/playlist-manager/dist/
+sudo mkdir -p /opt/ytmusic-mcp/widgets/oauth-login/dist
+sudo cp widgets/oauth-login/dist/index.html /opt/ytmusic-mcp/widgets/oauth-login/dist/
 sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
 sudo mkdir -p /home/ubuntu/prj/ytmusic-mcp/data
 sudo chown ubuntu:ubuntu /home/ubuntu/prj/ytmusic-mcp/data  # use the service User/Group

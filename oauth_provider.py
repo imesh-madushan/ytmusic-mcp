@@ -6,7 +6,7 @@ login, keeps short-lived authorization state in memory, and persists registered
 clients and issued tokens in SQLite.
 """
 
-import html
+import json
 import secrets
 import time
 from pathlib import Path
@@ -26,6 +26,8 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from oauth_store import SQLiteOAuthStore
+
+OAUTH_UI_PATH = Path(__file__).resolve().parent / "widgets" / "oauth-login" / "dist" / "index.html"
 
 
 class ResourceRefreshToken(RefreshToken):
@@ -78,25 +80,20 @@ class PasswordOAuthProvider(
         self.pending_clients[login_state] = client.client_id
         return f"{self.issuer_url}/login?state={login_state}"
 
-    async def login_page(self, state: str) -> HTMLResponse:
+    async def login_page(self, state: str, error: str | None = None, status_code: int = 200) -> HTMLResponse:
         if state not in self.pending:
             raise HTTPException(400, "Invalid or expired authorization request")
-        safe_state = html.escape(state, quote=True)
-        return HTMLResponse(
-            f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Authorize YouTube Music MCP</title>
-<style>body{{font:16px system-ui;max-width:28rem;margin:4rem auto;padding:0 1rem}}
-label{{display:block;margin-top:1rem}}input{{box-sizing:border-box;width:100%;padding:.7rem}}
-button{{margin-top:1.25rem;padding:.7rem 1rem}}</style></head>
-<body><h1>Authorize YouTube Music MCP</h1>
-<p>Sign in with the private OAuth credentials configured on your server.</p>
-<form action="/login/callback" method="post">
-<input type="hidden" name="state" value="{safe_state}">
-<label>Username<input name="username" autocomplete="username" required></label>
-<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-<button type="submit">Authorize Claude</button></form></body></html>"""
-        )
+        client = await self.get_client(self.pending_clients[state])
+        page_data = json.dumps({
+            "state": state,
+            "clientName": (client.client_name if client else None) or "your MCP client",
+            "error": error,
+        }).replace("<", "\\u003c")
+        try:
+            document = OAUTH_UI_PATH.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError("OAuth login UI is not built. Run `npm run build` in widgets/oauth-login.") from exc
+        return HTMLResponse(document.replace('"__OAUTH_PAGE_DATA__"', page_data), status_code=status_code)
 
     async def login_callback(self, request: Request) -> Response:
         form = await request.form()
@@ -111,7 +108,7 @@ button{{margin-top:1.25rem;padding:.7rem 1rem}}</style></head>
         if params is None or client_id is None:
             raise HTTPException(400, "Invalid or expired authorization request")
         if not secrets.compare_digest(username, self.username) or not secrets.compare_digest(password, self.password):
-            raise HTTPException(401, "Invalid username or password")
+            return await self.login_page(state, "That username or password did not match.", 401)
 
         code = secrets.token_urlsafe(32)
         self.auth_codes[code] = AuthorizationCode(
