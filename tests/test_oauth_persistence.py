@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 from pydantic import AnyUrl
 
 from mcp.server.auth.provider import AccessToken
@@ -15,10 +16,12 @@ from mcp.shared.auth import OAuthClientInformationFull
 from oauth_provider import PasswordOAuthProvider, ResourceRefreshToken
 from oauth_store import SQLiteOAuthStore
 
+TEST_CREDENTIAL_KEY = Fernet.generate_key().decode("ascii")
+
 
 def provider(database: Path) -> PasswordOAuthProvider:
     return PasswordOAuthProvider(
-        "https://mcp.example.com", "owner", "password", "ytmusic", database
+        "https://mcp.example.com", "ytmusic", database, TEST_CREDENTIAL_KEY
     )
 
 

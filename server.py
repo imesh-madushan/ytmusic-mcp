@@ -6,9 +6,8 @@ search, create/delete playlists, list playlists, view a playlist,
 add tracks, remove tracks, and reorder tracks (move to top/bottom/
 before another track).
 
-Auth: reads browser.json (created via `python3 setup_auth.py`, using the
-free browser-cookie method) from the same directory, or from the path in
-the YTMUSIC_AUTH_FILE env var.
+Auth: every OAuth grant owns an encrypted YouTube Music browser session.
+No process-global browser.json credentials are used.
 
 Built on FastMCP and the standard MCP Apps resource protocol.
 """
@@ -16,6 +15,7 @@ Built on FastMCP and the standard MCP Apps resource protocol.
 import base64
 import logging
 import os
+import socket
 import sys
 import time
 from functools import lru_cache, wraps
@@ -23,13 +23,19 @@ from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.types import CallToolResult, Icon, TextContent
 from ytmusicapi import YTMusic
+import urllib3.util.connection as urllib3_connection
 
 
 # Apply the project configuration to direct runs as well as systemd launches.
 # Existing process/systemd variables take precedence over values in the file.
 load_dotenv(Path(__file__).resolve().with_name(".env"))
+
+# This deployment intentionally disables IPv6. Keep all requests-based
+# outbound traffic on IPv4 instead of waiting on unreachable IPv6 addresses.
+urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
 
 logging.basicConfig(
     level=os.environ.get("YTMUSIC_LOG_LEVEL", "INFO").upper(),
@@ -44,11 +50,6 @@ LOGGER = logging.getLogger(__name__)
 LIBRARY_LOG_LEVEL = os.environ.get("MCP_LIBRARY_LOG_LEVEL", "INFO").upper()
 for logger_name in ("mcp", "sse_starlette", "httpx", "httpcore"):
     logging.getLogger(logger_name).setLevel(LIBRARY_LOG_LEVEL)
-
-AUTH_FILE = Path(os.environ.get(
-    "YTMUSIC_AUTH_FILE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser.json"),
-)).resolve()
 
 PLAYLIST_APP_URI = "ui://ytmusic/playlist-manager-v4.html"
 PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-manager-v4-openai.html"
@@ -80,16 +81,15 @@ if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
     from oauth_provider import PasswordOAuthProvider
 
     public_url = os.environ.get("MCP_PUBLIC_URL", "").rstrip("/")
-    oauth_username = os.environ.get("OAUTH_USERNAME", "")
-    oauth_password = os.environ.get("OAUTH_PASSWORD", "")
-    if not public_url or not oauth_username or not oauth_password:
-        sys.exit("MCP_PUBLIC_URL, OAUTH_USERNAME, and OAUTH_PASSWORD are required in HTTP mode")
+    credential_key = os.environ.get("YTMUSIC_CREDENTIAL_KEY", "")
+    if not public_url or not credential_key:
+        sys.exit("MCP_PUBLIC_URL and YTMUSIC_CREDENTIAL_KEY are required in HTTP mode")
     issuer_url = public_url.rsplit("/", 1)[0]
     oauth_database = Path(
         os.environ.get("OAUTH_DB_PATH", str(Path(__file__).resolve().with_name("oauth.sqlite3")))
     )
     OAUTH_PROVIDER = PasswordOAuthProvider(
-        issuer_url, oauth_username, oauth_password, "ytmusic", oauth_database
+        issuer_url, "ytmusic", oauth_database, credential_key
     )
     static_client_id = os.environ.get("OAUTH_CLIENT_ID", "")
     static_client_secret = os.environ.get("OAUTH_CLIENT_SECRET", "")
@@ -190,14 +190,33 @@ if OAUTH_PROVIDER is not None:
 
     @mcp.custom_route("/login", methods=["GET"])
     async def oauth_login(request: Request) -> Response:
-        state = request.query_params.get("state", "")
-        return await OAUTH_PROVIDER.login_page(state)
+        return await OAUTH_PROVIDER.login_page(request.query_params.get("state", ""))
 
     @mcp.custom_route("/login/callback", methods=["POST"])
     async def oauth_login_callback(request: Request) -> Response:
         return await OAUTH_PROVIDER.login_callback(request)
 
-_yt: YTMusic | None = None
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    @mcp.custom_route("/youtube-auth", methods=["GET"])
+    async def youtube_auth(request: Request) -> Response:
+        return await OAUTH_PROVIDER.youtube_auth_page(
+            request.query_params.get("state", ""), request.query_params.get("ticket", "")
+        )
+
+    @mcp.custom_route("/youtube-auth/callback", methods=["POST"])
+    async def youtube_auth_callback(request: Request) -> Response:
+        return await OAUTH_PROVIDER.youtube_auth_callback(request)
+
+
+_yt_clients: dict[str, YTMusic] = {}
+
+def _oauth_subject() -> str:
+    token = get_access_token()
+    if token is None or not token.subject:
+        raise RuntimeError("An authenticated OAuth user is required for YouTube Music tools.")
+    return token.subject
 
 
 def log_tool_errors(func):
@@ -206,27 +225,45 @@ def log_tool_errors(func):
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except Exception:
+        except Exception as exc:
             LOGGER.exception("MCP tool %s failed", func.__name__)
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            message = str(exc).lower()
+            auth_markers = ("unauthorized", "authentication required", "login required", "sapisid")
+            if status_code in (401, 403) or any(marker in message for marker in auth_markers):
+                token = get_access_token()
+                subject = token.subject if token is not None else None
+                if subject and OAUTH_PROVIDER is not None:
+                    OAUTH_PROVIDER.store.invalidate_youtube_credentials(
+                        subject, "YouTube authentication rejected"
+                    )
+                    _yt_clients.pop(subject, None)
+                    setup_url = OAUTH_PROVIDER.reconnect_url(subject)
+                    raise RuntimeError(
+                        "Your YouTube Music browser session expired. "
+                        f"Open {setup_url} to paste fresh request headers, then retry."
+                    ) from exc
             raise
 
     return wrapper
 
 
 def get_client() -> YTMusic:
-    """Lazily create the YTMusic client so import/list-tools works even
-    before auth is set up."""
-    global _yt
-    if _yt is None:
-        LOGGER.info("Initializing YouTube Music client from %s", AUTH_FILE)
-        try:
-            _yt = YTMusic(str(AUTH_FILE))
-        except OSError as exc:
-            raise RuntimeError(
-                f"Could not load YouTube Music browser authentication from {AUTH_FILE}."
-            ) from exc
-        LOGGER.info("YouTube Music client initialized")
-    return _yt
+    """Return the YouTube Music session belonging to this OAuth grant."""
+    subject = _oauth_subject()
+    cached = _yt_clients.get(subject)
+    if cached is not None:
+        return cached
+    if OAUTH_PROVIDER is None:
+        raise RuntimeError("Per-user YouTube Music sessions require HTTP OAuth mode.")
+    headers = OAUTH_PROVIDER.youtube_headers(subject)
+    if headers is None:
+        url = OAUTH_PROVIDER.reconnect_url(subject)
+        raise RuntimeError(f"YouTube Music is not connected. Open {url} to paste fresh browser request headers.")
+    client = YTMusic(headers)
+    _yt_clients[subject] = client
+    return client
 
 
 def _thumbnail_url(item: dict[str, Any], target_width: int = 120) -> str | None:
@@ -260,6 +297,19 @@ def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
         "album": (track.get("album") or {}).get("name"),
         "duration": track.get("duration"),
         "thumbnail": _thumbnail_url(track),
+    }
+
+
+@mcp.tool()
+def reconnect_youtube_music() -> dict[str, str]:
+    """Get a private setup link when YouTube Music cookies are missing or expired."""
+    subject = _oauth_subject()
+    if OAUTH_PROVIDER is None:
+        raise RuntimeError("YouTube Music reconnect requires HTTP OAuth mode.")
+    return {
+        "status": "connected" if OAUTH_PROVIDER.youtube_headers(subject) else "reconnect_required",
+        "setupUrl": OAUTH_PROVIDER.reconnect_url(subject),
+        "instructions": "Open setupUrl, copy fresh request headers from a music.youtube.com /youtubei/v1/next request, and paste them into the private form.",
     }
 
 

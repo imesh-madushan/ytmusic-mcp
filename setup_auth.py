@@ -20,12 +20,17 @@ AUTH_FILE = Path(os.environ.get("YTMUSIC_AUTH_FILE", DEFAULT_AUTH_FILE)).resolve
 
 
 def normalize_headers(raw: str) -> str:
-    """Convert Firefox structured header exports to normal header lines."""
+    """Normalize raw headers, browser JSON/HAR exports, and copied cURL."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         # Firefox can export an otherwise JSON-shaped block with an unquoted
         # Cookie value. Parse that variant without ever logging its contents.
+        curl_headers = [next(value for value in match if value) for match in re.findall(r"(?:-H|--header)\s+(?:\x27([^\x27]*)\x27|\"([^\"]*)\")", raw)]
+        cookie_matches = re.findall(r"(?:-b|--cookie)\s+(?:\x27([^\x27]*)\x27|\"([^\"]*)\")", raw)
+        curl_headers.extend(f"cookie: {next(value for value in match if value)}" for match in cookie_matches)
+        if curl_headers:
+            return "\n".join(curl_headers)
         converted: list[str] = []
         pending_name: str | None = None
         for line in raw.splitlines():
@@ -39,12 +44,24 @@ def normalize_headers(raw: str) -> str:
             if value_match:
                 converted.append(f"{pending_name}: {value_match.group(1)}")
                 pending_name = None
-            elif pending_name.lower() == "cookie" and "=" in line:
-                converted.append(f"{pending_name}: {line.strip().rstrip(chr(34))}")
-                pending_name = None
         return "\n".join(converted) if converted else raw
-
-    headers = data.get("requestHeaders", {}).get("headers", [])
+    headers: object = []
+    if isinstance(data, list):
+        headers = data
+    elif isinstance(data, dict):
+        request_headers = data.get("requestHeaders")
+        if isinstance(request_headers, dict):
+            headers = request_headers.get("headers", [])
+        elif isinstance(data.get("headers"), list):
+            headers = data["headers"]
+        elif isinstance(data.get("request"), dict):
+            headers = data["request"].get("headers", [])
+        elif isinstance(data.get("log"), dict):
+            entries = data["log"].get("entries", [])
+            if entries and isinstance(entries[0], dict):
+                headers = entries[0].get("request", {}).get("headers", [])
+        elif all(isinstance(value, (str, int, float, bool)) for value in data.values()):
+            return "\n".join(f"{name}: {value}" for name, value in data.items())
     if not isinstance(headers, list):
         return raw
     converted = [

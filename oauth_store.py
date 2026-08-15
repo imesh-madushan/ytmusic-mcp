@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -21,7 +22,7 @@ class OAuthStoreError(RuntimeError):
 class SQLiteOAuthStore:
     """Small transactional store used by the single-process OAuth provider."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: Path):
         self.path = path.expanduser().resolve()
@@ -64,6 +65,20 @@ class SQLiteOAuthStore:
                     );
                     CREATE INDEX IF NOT EXISTS oauth_refresh_tokens_expiry
                         ON oauth_refresh_tokens(expires_at);
+                    CREATE TABLE IF NOT EXISTS oauth_users (
+                        username TEXT PRIMARY KEY,
+                        password_salt BLOB NOT NULL,
+                        password_hash BLOB NOT NULL,
+                        created_at INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS youtube_credentials (
+                        subject TEXT PRIMARY KEY,
+                        encrypted_headers TEXT NOT NULL,
+                        validated_at INTEGER NOT NULL,
+                        last_used_at INTEGER,
+                        invalidated_at INTEGER,
+                        validation_error TEXT
+                    );
                     """
                 )
                 row = connection.execute(
@@ -74,10 +89,15 @@ class SQLiteOAuthStore:
                         "INSERT INTO schema_metadata(key, value) VALUES ('schema_version', ?)",
                         (str(self.SCHEMA_VERSION),),
                     )
-                elif int(row["value"]) != self.SCHEMA_VERSION:
+                elif int(row["value"]) > self.SCHEMA_VERSION:
                     raise OAuthStoreError(
                         f"Unsupported OAuth database schema version {row['value']} "
                         f"(expected {self.SCHEMA_VERSION})"
+                    )
+                elif int(row["value"]) < self.SCHEMA_VERSION:
+                    connection.execute(
+                        "UPDATE schema_metadata SET value = ? WHERE key = 'schema_version'",
+                        (str(self.SCHEMA_VERSION),),
                     )
             os.chmod(self.path, 0o600)
         except (OSError, sqlite3.Error, ValueError) as exc:
@@ -205,4 +225,66 @@ class SQLiteOAuthStore:
             connection.execute(
                 "DELETE FROM oauth_refresh_tokens WHERE expires_at IS NOT NULL AND expires_at < ?",
                 (now,),
+            )
+
+    def set_oauth_user_password(self, username: str, password: str) -> None:
+        salt = os.urandom(16)
+        password_hash = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 600_000)
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO oauth_users(username, password_salt, password_hash, created_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(username) DO UPDATE SET
+                     password_salt = excluded.password_salt,
+                     password_hash = excluded.password_hash""",
+                (username, salt, password_hash, int(time.time())),
+            )
+
+    def verify_oauth_user(self, username: str, password: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT password_salt, password_hash FROM oauth_users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        if row is None:
+            return False
+        candidate = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), row["password_salt"], 600_000
+        )
+        return hmac.compare_digest(candidate, row["password_hash"])
+
+    def save_youtube_credentials(self, subject: str, encrypted_headers: str) -> None:
+        now = int(time.time())
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO youtube_credentials(subject, encrypted_headers, validated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(subject) DO UPDATE SET
+                     encrypted_headers = excluded.encrypted_headers,
+                     validated_at = excluded.validated_at,
+                     invalidated_at = NULL,
+                     validation_error = NULL""",
+                (subject, encrypted_headers, now),
+            )
+
+    def get_youtube_credentials(self, subject: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT encrypted_headers FROM youtube_credentials
+                   WHERE subject = ? AND invalidated_at IS NULL""",
+                (subject,),
+            ).fetchone()
+            if row is not None:
+                connection.execute(
+                    "UPDATE youtube_credentials SET last_used_at = ? WHERE subject = ?",
+                    (int(time.time()), subject),
+                )
+        return row["encrypted_headers"] if row else None
+
+    def invalidate_youtube_credentials(self, subject: str, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE youtube_credentials
+                   SET invalidated_at = ?, validation_error = ? WHERE subject = ?""",
+                (int(time.time()), error[:500], subject),
             )

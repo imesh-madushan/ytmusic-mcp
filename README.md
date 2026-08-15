@@ -5,8 +5,8 @@ search YouTube Music and manage playlists: create/delete, add/remove tracks,
 reorder tracks (top/bottom/before another track). UI-capable MCP clients can
 also render a responsive, fast, filterable playlist track browser.
 
-**Scope of this setup:** built for exactly one user (you), hosted on your
-own Ubuntu box, protected by an OAuth 2.1 login. Recommended to
+**Scope of this setup:** supports isolated OAuth grants for multiple users, hosted on your
+own Ubuntu box, protected by OAuth 2.1 and per-grant YouTube session validation. Recommended to
 run against a **secondary Google account**, not your main one, since a
 leaked token means full playlist read/write access to whatever account is
 authenticated.
@@ -19,23 +19,11 @@ authenticated.
 pip install -r requirements.txt
 ```
 
-## 2. Auth against YouTube Music (secondary account)
+## 2. Connect YouTube Music
 
-Log into your **secondary Gmail/YouTube account** in the browser you use for
-this, then run:
+Each OAuth authorization gets its own isolated YouTube Music session. During connector login, the server asks the user to copy request headers from a signed-in `music.youtube.com` browser tab. It validates them, encrypts them with `YTMUSIC_CREDENTIAL_KEY`, and stores them under that OAuth grant only. No shared or hardcoded `browser.json` is used.
 
-```bash
-python3 setup_auth.py
-```
-
-Follow the printed steps (DevTools → Network tab → copy request headers
-from a music.youtube.com request). This writes `browser.json`, which
-`server.py` reads automatically. Cookie-based auth can go stale — re-run
-this if tools start failing.
-
-Paste the headers, then press Enter on one additional empty line. Firefox's
-structured request-header JSON export is also accepted. This project uses
-browser-cookie authentication only; OAuth credentials are rejected.
+If YouTube expires the browser session, a tool error supplies a short-lived private reconnect link. The `reconnect_youtube_music` tool can also generate that link. Open it, follow the same DevTools guidance, paste fresh headers, and retry the original request.
 
 ## Playlist manager UI
 
@@ -53,11 +41,9 @@ the connector after UI/tool metadata changes so the host refreshes `tools/list`.
 The OAuth sign-in page is a self-contained React app too. To change it, work in
 `widgets/oauth-login`, run `npm run build`, and commit `dist/index.html`.
 
-## 3. Local test (optional, before deploying)
+## 3. Local verification
 
-```bash
-python3 -c "from server import get_client; print(get_client().get_library_playlists(limit=5))"
-```
+Run `pytest -q`. YouTube Music calls require an authenticated HTTP MCP request and deliberately do not fall back to local shared cookies.
 
 ---
 
@@ -74,7 +60,6 @@ sudo mkdir -p /opt/ytmusic-mcp/widgets/playlist-manager/dist
 sudo cp widgets/playlist-manager/dist/index.html /opt/ytmusic-mcp/widgets/playlist-manager/dist/
 sudo mkdir -p /opt/ytmusic-mcp/widgets/oauth-login/dist
 sudo cp widgets/oauth-login/dist/index.html /opt/ytmusic-mcp/widgets/oauth-login/dist/
-sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
 sudo mkdir -p /home/ubuntu/prj/ytmusic-mcp/data
 sudo chown ubuntu:ubuntu /home/ubuntu/prj/ytmusic-mcp/data  # use the service User/Group
 cd /opt/ytmusic-mcp
@@ -86,7 +71,8 @@ sudo pip install -r requirements.txt --break-system-packages
 ```bash
 sudo cp .env.example /opt/ytmusic-mcp/.env
 openssl rand -base64 32                       # generate the OAuth login password
-sudo nano /opt/ytmusic-mcp/.env               # set public URL, username, and password
+.venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" # credential key
+sudo nano /opt/ytmusic-mcp/.env               # set the public URL and credential encryption key
 ```
 
 Leave `MCP_HOST=127.0.0.1` — the app must never bind directly to the public
@@ -171,7 +157,7 @@ Your MCP endpoint: **`https://mcp.yourdomain.com/ytmusic-mcp`**
    Dynamic Client Registration. To use the advanced fields instead, configure
    the matching `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, and Claude callback
    URI in `OAUTH_REDIRECT_URIS` first.
-4. Save, complete the private username/password login, then enable it in a
+4. Save, validate your private YouTube Music browser session, then enable it in a
    conversation via **+ → Connectors**.
 
 ## 6. Connect from ChatGPT
@@ -186,28 +172,25 @@ the standard MCP OAuth discovery and authorization flow.
 
 ## Security summary
 
-- The OAuth login protects access to your YouTube account (via `browser.json`)
-  — use a generated password and keep it private.
+- The OAuth login protects access to each connector grant; every grant receives a unique subject and encrypted YouTube Music headers.
+- `YTMUSIC_CREDENTIAL_KEY` decrypts all stored sessions. Keep it private and backed up; changing it invalidates existing sessions.
 - App binds `127.0.0.1` only; nginx is the sole public-facing surface and
   exposes only the MCP resource and required OAuth routes on `:443`.
 - Rate limiting + fail2ban blunt scanning/brute-force attempts.
 - Using a secondary Google account caps the blast radius of a leak to that
   account's playlists, not your main one.
-- Rotate the OAuth password any time you suspect exposure: regenerate, update `.env`,
-  `sudo systemctl restart ytmusic-mcp`. Rotating this login password does not revoke already issued OAuth tokens.
+- Revoke individual connector grants when access should end; deleting the OAuth database signs out every connector.
 - To sign out every connector after a compromise, stop the service, move or delete
   the file configured by `OAUTH_DB_PATH`, and restart. This reset is destructive;
   every client must register and authorize again.
 - Back up the OAuth database if preserving connector registrations across server
   migrations matters. Treat the backup as a secret because registered client
   credentials are stored in it.
-- `browser.json` can expire — re-run `setup_auth.py` (on your dev machine,
-  then re-copy to the server) if calls start failing with auth errors.
+- YouTube cookies can expire. Tool errors provide a short-lived reconnect URL so that only the affected OAuth user replaces their own headers.
 
 ## Real-account integration tests
 
-The integration suite uses `browser.json` and performs real YouTube Music
-writes. It creates a uniquely named private playlist and deletes it during
+The integration suite performs real YouTube Music writes and must be adapted to an authenticated test OAuth subject before it is enabled. It creates a uniquely named private playlist and deletes it during
 cleanup, including when a test fails. Run it explicitly with:
 
 ```bash
@@ -223,6 +206,7 @@ Without `--run-youtube-integration`, these account-mutating tests are skipped.
 
 | Tool | What it does |
 |---|---|
+| `reconnect_youtube_music` | Return a short-lived private setup URL for missing or expired YouTube browser credentials |
 | `search_music` | Search songs/videos/albums/artists/playlists |
 | `list_my_playlists` | List your playlists |
 | `get_playlist` | Get a playlist's tracks (includes `setVideoId`, needed for remove/reorder) |
