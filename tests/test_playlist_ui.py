@@ -45,6 +45,13 @@ def test_tools_advertise_mcp_apps_and_chatgpt_metadata() -> None:
         assert tool.meta["openai/outputTemplate"] == "ui://ytmusic/playlist-manager-v4-openai.html"
 
 
+def test_server_advertises_connector_icon() -> None:
+    icons = server.mcp._mcp_server.icons
+    assert icons and icons[0].src.startswith("data:image/png;base64,")
+    assert icons[0].mimeType == "image/png"
+    assert icons[0].sizes == ["96x96"]
+
+
 def test_modern_and_chatgpt_react_resources_are_registered() -> None:
     resources = {str(r.uri): r for r in server.mcp._resource_manager.list_resources()}
     modern = resources["ui://ytmusic/playlist-manager-v4.html"]
@@ -54,6 +61,10 @@ def test_modern_and_chatgpt_react_resources_are_registered() -> None:
     assert "https://i.ytimg.com" in modern.meta["ui"]["csp"]["resourceDomains"]
     assert chatgpt.mime_type == "text/html+skybridge"
     assert chatgpt.meta["openai/widgetPrefersBorder"] is True
+    legacy = resources["ui://ytmusic/playlist-tracks"]
+    assert legacy.mime_type == "text/html+skybridge"
+    assert "https://i.ytimg.com" in legacy.meta["openai/widgetCSP"]["resource_domains"]
+    assert "https://yt3.googleusercontent.com" in legacy.meta["openai/widgetCSP"]["resource_domains"]
 
 
 def test_compiled_react_app_has_host_bridges_and_no_python_data_marker() -> None:

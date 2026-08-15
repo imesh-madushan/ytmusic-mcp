@@ -80,6 +80,7 @@ export default function App() {
   useEffect(() => {
     const accept = (raw: any) => {
       const data = structured(raw)
+      if (Array.isArray(data)) setPlaylists(data)
       if (data?.tracks) setPlaylist(data)
       if (Array.isArray(data?.playlists)) setPlaylists(data.playlists)
     }

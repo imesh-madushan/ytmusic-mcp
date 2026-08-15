@@ -68,6 +68,8 @@ python3 -c "from server import get_client; print(get_client().get_library_playli
 ```bash
 sudo mkdir -p /opt/ytmusic-mcp
 sudo cp server.py oauth_provider.py oauth_store.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
+sudo mkdir -p /opt/ytmusic-mcp/assets
+sudo cp assets/connector-icon-96.png /opt/ytmusic-mcp/assets/
 sudo mkdir -p /opt/ytmusic-mcp/widgets/playlist-manager/dist
 sudo cp widgets/playlist-manager/dist/index.html /opt/ytmusic-mcp/widgets/playlist-manager/dist/
 sudo mkdir -p /opt/ytmusic-mcp/widgets/oauth-login/dist

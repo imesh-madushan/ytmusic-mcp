@@ -13,6 +13,7 @@ the YTMUSIC_AUTH_FILE env var.
 Built on FastMCP and the standard MCP Apps resource protocol.
 """
 
+import base64
 import logging
 import os
 import sys
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, Icon, TextContent
 from ytmusicapi import YTMusic
 
 
@@ -51,9 +52,16 @@ AUTH_FILE = Path(os.environ.get(
 
 PLAYLIST_APP_URI = "ui://ytmusic/playlist-manager-v4.html"
 PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-manager-v4-openai.html"
+PLAYLIST_LEGACY_URI = "ui://ytmusic/playlist-tracks"
 MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
 OPENAI_WIDGET_MIME_TYPE = "text/html+skybridge"
 WIDGET_PATH = Path(__file__).resolve().parent / "widgets" / "playlist-manager" / "dist" / "index.html"
+CONNECTOR_ICON_PATH = Path(__file__).resolve().parent / "assets" / "connector-icon-96.png"
+CONNECTOR_ICONS = [Icon(
+    src="data:image/png;base64," + base64.b64encode(CONNECTOR_ICON_PATH.read_bytes()).decode("ascii"),
+    mimeType="image/png",
+    sizes=["96x96"],
+)]
 
 @lru_cache(maxsize=1)
 def playlist_manager_html() -> str:
@@ -101,6 +109,7 @@ if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
         )
     mcp = FastMCP(
         "youtube-music",
+        icons=CONNECTOR_ICONS,
         host=os.environ.get("MCP_HOST", "127.0.0.1"),
         port=int(os.environ.get("MCP_PORT", "8787")),
         auth_server_provider=OAUTH_PROVIDER,
@@ -117,7 +126,7 @@ if os.environ.get("MCP_TRANSPORT", "stdio") == "http":
         ),
     )
 else:
-    mcp = FastMCP("youtube-music")
+    mcp = FastMCP("youtube-music", icons=CONNECTOR_ICONS)
 
 
 @mcp.resource(
@@ -154,6 +163,24 @@ def playlist_tracks_app_resource() -> str:
     },
 )
 def playlist_tracks_openai_resource() -> str:
+    return playlist_manager_html()
+
+
+@mcp.resource(
+    PLAYLIST_LEGACY_URI,
+    name="YouTube Music playlist tracks (legacy compatibility)",
+    description="Compatibility alias for previously cached ChatGPT connectors",
+    mime_type=OPENAI_WIDGET_MIME_TYPE,
+    meta={
+        "openai/widgetDescription": "Manage YouTube Music playlists and tracks.",
+        "openai/widgetPrefersBorder": True,
+        "openai/widgetCSP": {"resource_domains": [
+            "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+            "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+        ]},
+    },
+)
+def playlist_tracks_legacy_resource() -> str:
     return playlist_manager_html()
 
 
