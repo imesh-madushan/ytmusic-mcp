@@ -21,7 +21,7 @@ def sample_playlist() -> dict:
 
 def test_ui_tool_returns_text_and_structured_data(monkeypatch) -> None:
     playlist = sample_playlist()
-    monkeypatch.setattr(server, "get_playlist", lambda playlist_id, limit=200: playlist)
+    monkeypatch.setattr(server, "get_playlist", lambda playlist_id, limit=None: playlist)
     result = server.get_playlist_tracks_ui("PL123")
     assert result.structuredContent == playlist
     assert len(result.content) == 1
@@ -40,15 +40,15 @@ def test_manager_tool_returns_playlists_as_structured_data(monkeypatch) -> None:
 def test_tools_advertise_mcp_apps_and_chatgpt_metadata() -> None:
     for name in ("open_music_manager_ui", "get_playlist_tracks_ui"):
         tool = server.mcp._tool_manager.get_tool(name)
-        assert tool.meta["ui"]["resourceUri"] == "ui://ytmusic/playlist-tracks"
-        assert tool.meta["ui/resourceUri"] == "ui://ytmusic/playlist-tracks"
-        assert tool.meta["openai/outputTemplate"] == "ui://ytmusic/playlist-tracks-openai"
+        assert tool.meta["ui"]["resourceUri"] == "ui://ytmusic/playlist-manager-v4.html"
+        assert tool.meta["ui/resourceUri"] == "ui://ytmusic/playlist-manager-v4.html"
+        assert tool.meta["openai/outputTemplate"] == "ui://ytmusic/playlist-manager-v4-openai.html"
 
 
 def test_modern_and_chatgpt_react_resources_are_registered() -> None:
     resources = {str(r.uri): r for r in server.mcp._resource_manager.list_resources()}
-    modern = resources["ui://ytmusic/playlist-tracks"]
-    chatgpt = resources["ui://ytmusic/playlist-tracks-openai"]
+    modern = resources["ui://ytmusic/playlist-manager-v4.html"]
+    chatgpt = resources["ui://ytmusic/playlist-manager-v4-openai.html"]
     assert modern.mime_type == "text/html;profile=mcp-app"
     assert modern.meta["ui"]["prefersBorder"] is True
     assert "https://i.ytimg.com" in modern.meta["ui"]["csp"]["resourceDomains"]
@@ -78,3 +78,18 @@ def test_thumbnail_picker_chooses_smallest_sufficient_image() -> None:
         {"url": "huge", "width": 1000},
     ]}
     assert server._thumbnail_url(item) == "ideal"
+
+
+def test_thumbnail_picker_supports_get_song_video_details() -> None:
+    song = {
+        "videoDetails": {
+            "thumbnail": {
+                "thumbnails": [
+                    {"url": "small", "width": 60},
+                    {"url": "suitable", "width": 120},
+                    {"url": "large", "width": 544},
+                ]
+            }
+        }
+    }
+    assert server._thumbnail_url(song) == "suitable"

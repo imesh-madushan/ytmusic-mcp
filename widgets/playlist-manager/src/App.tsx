@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { App as McpApp, PostMessageTransport } from '@modelcontextprotocol/ext-apps'
+import { LightweightMcpApp } from './mcp'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import './index.css'
 
@@ -16,18 +16,18 @@ function structured(value: any): any {
   return value?.structuredContent ?? value?.structured_content ?? value?.toolOutput ?? value
 }
 
-let mcp: McpApp | null = null
+let mcp: LightweightMcpApp | null = null
 async function callTool(name: string, args: Record<string, unknown>) {
-  if (mcp) return structured(await mcp.callServerTool({ name, arguments: args }))
+  if (mcp) return structured(await mcp.callServerTool(name, args))
   if (window.openai?.callTool) return structured(await window.openai.callTool(name, args))
   throw new Error('This host does not expose tool calls to the app.')
 }
 
 function Artwork({ track }: { track: Track }) {
   const [failed, setFailed] = useState(false)
-  const source = track.videoId ? `https://i.ytimg.com/vi/${encodeURIComponent(track.videoId)}/default.jpg` : track.thumbnail
-  return source && !failed
-    ? <img className="art" src={source} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />
+  useEffect(() => setFailed(false), [track.thumbnail])
+  return track.thumbnail && !failed
+    ? <img className="art" src={track.thumbnail} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />
     : <span className="art placeholder">♪</span>
 }
 
@@ -36,6 +36,8 @@ export default function App() {
   const [playlist, setPlaylist] = useState<Playlist | null>(null)
   const [view, setView] = useState<View>('tracks')
   const [filter, setFilter] = useState('')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(50)
   const [search, setSearch] = useState('')
   const [searchType, setSearchType] = useState('songs')
   const [results, setResults] = useState<SearchResult[]>([])
@@ -58,7 +60,7 @@ export default function App() {
     if (Array.isArray(data)) setPlaylists(data)
   }
   const openPlaylist = async (id: string) => {
-    const data = await run('Loading playlist…', () => callTool('get_playlist', { playlist_id: id, limit: 1000 }))
+    const data = await run('Loading playlist…', () => callTool('get_playlist', { playlist_id: id }))
     if (data?.tracks) { setPlaylist(data); setView('tracks'); setSelectedTracks(new Set()) }
   }
   const mutate = async (label: string, name: string, args: Record<string, unknown>, refresh = true) => {
@@ -82,19 +84,22 @@ export default function App() {
       if (Array.isArray(data?.playlists)) setPlaylists(data.playlists)
     }
     accept(window.openai?.toolOutput)
-    const app = new McpApp({ name: 'ytmusic-playlist-manager', version: '1.0.0' })
-    app.ontoolresult = accept
-    app.connect(new PostMessageTransport(window.parent, window.parent)).then(() => { mcp = app; refreshPlaylists() }).catch(() => refreshPlaylists())
+    const app = new LightweightMcpApp(accept)
+    app.connect().then(() => { mcp = app; refreshPlaylists() }).catch(() => refreshPlaylists())
     const globals = (event: Event) => accept((event as CustomEvent).detail?.globals?.toolOutput)
     window.addEventListener('openai:set_globals', globals)
     return () => window.removeEventListener('openai:set_globals', globals)
   }, [])
 
-  const visible = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
     return (playlist?.tracks ?? []).map((track, index) => ({ track, index })).filter(({ track }) =>
       !q || [track.title, track.artists, track.album].some(v => v?.toLowerCase().includes(q)))
   }, [playlist, filter])
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const currentPage = Math.min(page, totalPages - 1)
+  const visible = useMemo(() => filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize), [filtered, currentPage, pageSize])
+  useEffect(() => setPage(0), [filter, pageSize, playlist?.playlistId])
   const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => scrollRef.current, estimateSize: () => 64, overscan: 6 })
 
   const submitSearch = async (event: React.FormEvent) => {
@@ -122,7 +127,7 @@ export default function App() {
         <div className="playlist-head"><div><span className="eyebrow">PLAYLIST</span><h2>{playlist.title || 'Untitled playlist'}</h2><p>{playlist.description || `${playlist.tracks.length} tracks · ${playlist.privacy || 'PRIVATE'}`}</p></div></div>
         <div className="tabs"><button className={view === 'tracks' ? 'active' : ''} onClick={() => setView('tracks')}>Tracks</button><button className={view === 'search' ? 'active' : ''} onClick={() => setView('search')}>Add music</button><button className={view === 'settings' ? 'active' : ''} onClick={() => setView('settings')}>Settings</button></div>
         {view === 'tracks' && <div className="panel tracks-panel">
-          <div className="toolbar"><input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter tracks…"/><span>{visible.length} tracks</span>{selectedTracks.size > 0 && <button className="danger" onClick={() => { if (confirm(`Remove ${selectedTracks.size} selected track(s)?`)) mutate('Removing tracks…', 'remove_tracks_from_playlist', { playlist_id: playlist.playlistId, set_video_ids: [...selectedTracks] }) }}>Remove {selectedTracks.size}</button>}</div>
+          <div className="toolbar"><input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter tracks…"/><span>{filtered.length} tracks</span><label className="page-size">Show <select value={pageSize} onChange={e => setPageSize(Number(e.target.value))}>{[25,50,100,250].map(size => <option key={size} value={size}>{size}</option>)}</select></label>{selectedTracks.size > 0 && <button className="danger" onClick={() => { if (confirm(`Remove ${selectedTracks.size} selected track(s)?`)) mutate('Removing tracks…', 'remove_tracks_from_playlist', { playlist_id: playlist.playlistId, set_video_ids: [...selectedTracks] }) }}>Remove {selectedTracks.size}</button>}</div>
           <div className="track-scroll" ref={scrollRef}><div style={{ height: virtual.getTotalSize(), position: 'relative' }}>{virtual.getVirtualItems().map(row => {
             const { track, index } = visible[row.index]; const id = track.setVideoId || `${track.videoId}-${index}`
             return <div className="track" key={id} style={{ transform: `translateY(${row.start}px)` }}>
@@ -130,6 +135,7 @@ export default function App() {
               <div className="track-main"><b>{track.title || 'Unknown track'}</b><small>{track.artists || 'Unknown artist'}{track.album ? ` · ${track.album}` : ''}</small></div><small>{track.duration}</small>
               <div className="row-actions"><button disabled={index === 0 || !track.setVideoId} title="Move up" onClick={() => mutate('Moving track…', 'reorder_playlist_track', { playlist_id: playlist.playlistId, set_video_id: track.setVideoId, before_set_video_id: playlist.tracks[index - 1]?.setVideoId })}>↑</button><button disabled={index === playlist.tracks.length - 1 || !track.setVideoId} title="Move down" onClick={() => mutate('Moving track…', 'reorder_playlist_track', { playlist_id: playlist.playlistId, set_video_id: playlist.tracks[index + 1]?.setVideoId, before_set_video_id: track.setVideoId })}>↓</button><div className="more-wrap"><button title="More track actions">•••</button><div className="more-menu"><button onClick={() => mutate('Moving track…', 'move_track_to_top', { playlist_id: playlist.playlistId, set_video_id: track.setVideoId })}>Move to top</button><button onClick={() => mutate('Moving track…', 'move_track_to_bottom', { playlist_id: playlist.playlistId, set_video_id: track.setVideoId })}>Move to bottom</button></div></div></div>
             </div>})}</div></div>
+          <div className="pagination"><span>{filtered.length ? `${currentPage * pageSize + 1}–${Math.min((currentPage + 1) * pageSize, filtered.length)} of ${filtered.length}` : 'No tracks'}</span><div><button className="secondary" disabled={currentPage === 0} onClick={() => setPage(value => Math.max(0, value - 1))}>Previous</button><span>Page {currentPage + 1} of {totalPages}</span><button className="secondary" disabled={currentPage >= totalPages - 1} onClick={() => setPage(value => Math.min(totalPages - 1, value + 1))}>Next</button></div></div>
         </div>}
         {view === 'search' && <SearchPanel {...{search, setSearch, searchType, setSearchType, results, selectedResults, setSelectedResults, submitSearch}} onAdd={(top: boolean, duplicates: boolean) => mutate('Adding tracks…', 'add_tracks_to_playlist', { playlist_id: playlist.playlistId, video_ids: [...selectedResults], add_to_top: top, allow_duplicates: duplicates })}/>} 
         {view === 'settings' && <Settings playlist={playlist} onSave={(title, description, privacy_status) => mutate('Saving playlist…', 'rename_playlist', { playlist_id: playlist.playlistId, title, description, privacy_status })} onDelete={() => { if (confirm(`Permanently delete “${playlist.title}”?`)) mutate('Deleting playlist…', 'delete_playlist', { playlist_id: playlist.playlistId }, false).then(() => setPlaylist(null)) }}/>} 

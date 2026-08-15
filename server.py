@@ -13,7 +13,6 @@ the YTMUSIC_AUTH_FILE env var.
 Built on FastMCP and the standard MCP Apps resource protocol.
 """
 
-import json
 import logging
 import os
 import sys
@@ -21,12 +20,10 @@ import time
 from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any
-
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 from ytmusicapi import YTMusic
-from ytmusicapi.helpers import get_authorization, sapisid_from_cookie
 
 
 # Apply the project configuration to direct runs as well as systemd launches.
@@ -52,8 +49,8 @@ AUTH_FILE = Path(os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser.json"),
 )).resolve()
 
-PLAYLIST_APP_URI = "ui://ytmusic/playlist-tracks"
-PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-tracks-openai"
+PLAYLIST_APP_URI = "ui://ytmusic/playlist-manager-v4.html"
+PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-manager-v4-openai.html"
 MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
 OPENAI_WIDGET_MIME_TYPE = "text/html+skybridge"
 WIDGET_PATH = Path(__file__).resolve().parent / "widgets" / "playlist-manager" / "dist" / "index.html"
@@ -132,7 +129,8 @@ else:
         "ui": {
             "prefersBorder": True,
             "csp": {"resourceDomains": [
-                "https://i.ytimg.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+                "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+                "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
             ]},
         }
     },
@@ -150,7 +148,8 @@ def playlist_tracks_app_resource() -> str:
         "openai/widgetDescription": "Manage YouTube Music playlists, tracks, search, and ordering.",
         "openai/widgetPrefersBorder": True,
         "openai/widgetCSP": {"resource_domains": [
-            "https://i.ytimg.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+            "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+                "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
         ]},
     },
 )
@@ -187,57 +186,31 @@ def log_tool_errors(func):
     return wrapper
 
 
-def load_browser_auth(auth_file: Path = AUTH_FILE) -> dict[str, Any]:
-    """Load cookie headers and add ytmusicapi's browser-auth hash in memory."""
-    try:
-        headers = json.loads(auth_file.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            f"No browser-cookie auth file found at {auth_file}. "
-            "Run `python3 setup_auth.py` first."
-        ) from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError("browser.json is unreadable or invalid JSON.") from exc
-
-    keys = {str(key).lower() for key in headers} if isinstance(headers, dict) else set()
-    if {"cookie", "x-goog-authuser"} - keys:
-        raise RuntimeError(
-            "The auth file is not browser-cookie credentials. OAuth is not supported; "
-            "run `python3 setup_auth.py`."
-        )
-    origin = headers.get("origin") or headers.get("x-origin")
-    if not origin:
-        raise RuntimeError("browser.json is missing the Origin header; capture a /browse request.")
-    try:
-        sapisid = sapisid_from_cookie(headers["cookie"])
-    except (KeyError, ValueError) as exc:
-        raise RuntimeError(
-            "The cookie is missing __Secure-3PAPISID; capture headers from a logged-in /browse request."
-        ) from exc
-
-    # ytmusicapi 1.12.x needs this to classify the input as browser auth.
-    # It is derived from the cookie in memory; no OAuth credentials are used.
-    headers["authorization"] = get_authorization(f"{sapisid} {origin}")
-    return headers
-
-
 def get_client() -> YTMusic:
     """Lazily create the YTMusic client so import/list-tools works even
     before auth is set up."""
     global _yt
     if _yt is None:
-        headers = load_browser_auth()
-        LOGGER.info("Initializing YouTube Music client with browser-cookie authentication")
-        _yt = YTMusic(headers)
+        LOGGER.info("Initializing YouTube Music client from %s", AUTH_FILE)
+        try:
+            _yt = YTMusic(str(AUTH_FILE))
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not load YouTube Music browser authentication from {AUTH_FILE}."
+            ) from exc
         LOGGER.info("YouTube Music client initialized")
     return _yt
 
 
 def _thumbnail_url(item: dict[str, Any], target_width: int = 120) -> str | None:
-    """Return a predictable small image URL accepted by connector CSPs."""
-    if item.get("videoId"):
-        return f"https://i.ytimg.com/vi/{item['videoId']}/default.jpg"
-    candidates = [thumb for thumb in item.get("thumbnails") or [] if thumb.get("url")]
+    """Choose the smallest useful official artwork URL."""
+    thumbnail_data = (
+        item.get("thumbnails")
+        or (item.get("thumbnail") or {}).get("thumbnails")
+        or ((item.get("videoDetails") or {}).get("thumbnail") or {}).get("thumbnails")
+        or []
+    )
+    candidates = [thumb for thumb in thumbnail_data if thumb.get("url")]
     if not candidates:
         return None
     with_width = [thumb for thumb in candidates if isinstance(thumb.get("width"), int)]
@@ -318,7 +291,7 @@ def list_my_playlists(limit: int = 50) -> list[dict[str, Any]]:
 
 @mcp.tool()
 @log_tool_errors
-def get_playlist(playlist_id: str, limit: int = 200) -> dict[str, Any]:
+def get_playlist(playlist_id: str, limit: int | None = None) -> dict[str, Any]:
     """Get a playlist's metadata and its ordered list of tracks.
 
     Each track includes 'setVideoId', which is the ID you must use with
@@ -393,7 +366,7 @@ def open_music_manager_ui(limit: int = 100) -> CallToolResult:
     }
 )
 @log_tool_errors
-def get_playlist_tracks_ui(playlist_id: str, limit: int = 200) -> CallToolResult:
+def get_playlist_tracks_ui(playlist_id: str, limit: int | None = None) -> CallToolResult:
     """Show a playlist as an interactive track-list UI.
 
     UI-capable clients render a fast, compact track list with metadata, filtering, and
