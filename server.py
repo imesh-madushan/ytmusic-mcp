@@ -21,7 +21,6 @@ import time
 from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -52,10 +51,10 @@ LIBRARY_LOG_LEVEL = os.environ.get("MCP_LIBRARY_LOG_LEVEL", "INFO").upper()
 for logger_name in ("mcp", "sse_starlette", "httpx", "httpcore"):
     logging.getLogger(logger_name).setLevel(LIBRARY_LOG_LEVEL)
 
-PLAYLIST_APP_URI = "ui://ytmusic/playlist-manager-v5.html"
-PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-manager-v5-openai.html"
-PLAYLIST_V4_APP_URI = "ui://ytmusic/playlist-manager-v4.html"
-PLAYLIST_V4_OPENAI_URI = "ui://ytmusic/playlist-manager-v4-openai.html"
+PLAYLIST_APP_URI = "ui://ytmusic/playlist-manager-v4.html"
+PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-manager-v4-openai.html"
+PLAYLIST_V5_APP_URI = "ui://ytmusic/playlist-manager-v5.html"
+PLAYLIST_V5_OPENAI_URI = "ui://ytmusic/playlist-manager-v5-openai.html"
 PLAYLIST_LEGACY_URI = "ui://ytmusic/playlist-tracks"
 MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
 OPENAI_WIDGET_MIME_TYPE = "text/html+skybridge"
@@ -66,19 +65,6 @@ CONNECTOR_ICONS = [Icon(
     mimeType="image/png",
     sizes=["96x96"],
 )]
-
-YOUTUBE_RESOURCE_DOMAINS = [
-    "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
-    "https://*.googleusercontent.com", "https://lh3.googleusercontent.com",
-    "https://yt3.ggpht.com", "https://www.youtube.com",
-]
-YOUTUBE_FRAME_DOMAINS = ["https://www.youtube.com", "https://www.youtube-nocookie.com"]
-_public_url = os.environ.get("MCP_PUBLIC_URL", "")
-_public_parts = urlsplit(_public_url)
-WIDGET_DOMAIN = os.environ.get(
-    "MCP_WIDGET_DOMAIN",
-    f"{_public_parts.scheme}://{_public_parts.netloc}" if _public_parts.scheme and _public_parts.netloc else "",
-)
 
 @lru_cache(maxsize=1)
 def playlist_manager_html() -> str:
@@ -153,8 +139,10 @@ else:
     meta={
         "ui": {
             "prefersBorder": True,
-            **({"domain": WIDGET_DOMAIN} if WIDGET_DOMAIN else {}),
-            "csp": {"resourceDomains": YOUTUBE_RESOURCE_DOMAINS, "frameDomains": YOUTUBE_FRAME_DOMAINS},
+            "csp": {"resourceDomains": [
+                "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+                "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+            ]},
         }
     },
 )
@@ -170,8 +158,10 @@ def playlist_tracks_app_resource() -> str:
     meta={
         "openai/widgetDescription": "Manage YouTube Music playlists, tracks, search, and ordering.",
         "openai/widgetPrefersBorder": True,
-        **({"openai/widgetDomain": WIDGET_DOMAIN} if WIDGET_DOMAIN else {}),
-        "openai/widgetCSP": {"resource_domains": YOUTUBE_RESOURCE_DOMAINS, "frame_domains": YOUTUBE_FRAME_DOMAINS},
+        "openai/widgetCSP": {"resource_domains": [
+            "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+                "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+        ]},
     },
 )
 def playlist_tracks_openai_resource() -> str:
@@ -179,35 +169,39 @@ def playlist_tracks_openai_resource() -> str:
 
 
 @mcp.resource(
-    PLAYLIST_V4_APP_URI,
-    name="YouTube Music playlist manager (v4 compatibility)",
-    description="Compatibility alias for cached playlist manager tools",
+    PLAYLIST_V5_APP_URI,
+    name="YouTube Music playlist tracks (v5 compatibility)",
+    description="Compatibility alias serving the stable playlist manager",
     mime_type=MCP_APP_MIME_TYPE,
     meta={
         "ui": {
             "prefersBorder": True,
-            **({"domain": WIDGET_DOMAIN} if WIDGET_DOMAIN else {}),
-            "csp": {"resourceDomains": YOUTUBE_RESOURCE_DOMAINS, "frameDomains": YOUTUBE_FRAME_DOMAINS},
+            "csp": {"resourceDomains": [
+                "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+                "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+            ]},
         }
     },
 )
-def playlist_tracks_v4_app_resource() -> str:
+def playlist_tracks_v5_app_resource() -> str:
     return playlist_manager_html()
 
 
 @mcp.resource(
-    PLAYLIST_V4_OPENAI_URI,
-    name="YouTube Music playlist manager (v4 ChatGPT compatibility)",
-    description="Compatibility alias for cached ChatGPT playlist manager tools",
+    PLAYLIST_V5_OPENAI_URI,
+    name="YouTube Music playlist tracks (v5 ChatGPT compatibility)",
+    description="Compatibility alias serving the stable playlist manager",
     mime_type=OPENAI_WIDGET_MIME_TYPE,
     meta={
-        "openai/widgetDescription": "Manage and play YouTube Music playlists and tracks.",
+        "openai/widgetDescription": "Manage YouTube Music playlists, tracks, search, and ordering.",
         "openai/widgetPrefersBorder": True,
-        **({"openai/widgetDomain": WIDGET_DOMAIN} if WIDGET_DOMAIN else {}),
-        "openai/widgetCSP": {"resource_domains": YOUTUBE_RESOURCE_DOMAINS, "frame_domains": YOUTUBE_FRAME_DOMAINS},
+        "openai/widgetCSP": {"resource_domains": [
+            "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+            "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+        ]},
     },
 )
-def playlist_tracks_v4_openai_resource() -> str:
+def playlist_tracks_v5_openai_resource() -> str:
     return playlist_manager_html()
 
 
@@ -219,8 +213,10 @@ def playlist_tracks_v4_openai_resource() -> str:
     meta={
         "openai/widgetDescription": "Manage YouTube Music playlists and tracks.",
         "openai/widgetPrefersBorder": True,
-        **({"openai/widgetDomain": WIDGET_DOMAIN} if WIDGET_DOMAIN else {}),
-        "openai/widgetCSP": {"resource_domains": YOUTUBE_RESOURCE_DOMAINS, "frame_domains": YOUTUBE_FRAME_DOMAINS},
+        "openai/widgetCSP": {"resource_domains": [
+            "https://i.ytimg.com", "https://*.ytimg.com", "https://yt3.googleusercontent.com",
+            "https://*.googleusercontent.com", "https://lh3.googleusercontent.com", "https://yt3.ggpht.com"
+        ]},
     },
 )
 def playlist_tracks_legacy_resource() -> str:
@@ -332,35 +328,15 @@ def _thumbnail_url(item: dict[str, Any], target_width: int = 120) -> str | None:
 
 def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
     artists = ", ".join(a.get("name", "") for a in track.get("artists") or [])
-    video_id = track.get("videoId")
     return {
-        "kind": "track",
-        "videoId": video_id,
+        "videoId": track.get("videoId"),
         "setVideoId": track.get("setVideoId"),  # needed to remove/reorder
         "title": track.get("title"),
         "artists": artists,
         "album": (track.get("album") or {}).get("name"),
         "duration": track.get("duration"),
         "thumbnail": _thumbnail_url(track),
-        "youtubeMusicUrl": f"https://music.youtube.com/watch?v={video_id}" if video_id else None,
-        "playable": bool(video_id),
     }
-
-
-def _dedupe_tracks(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[str] = set()
-    output = []
-    for track in tracks:
-        video_id = track.get("videoId")
-        if video_id and video_id not in seen:
-            seen.add(video_id)
-            output.append(track)
-    return output
-
-
-def _watch_tracks(video_id: str, limit: int, radio: bool = False) -> list[dict[str, Any]]:
-    watch = get_client().get_watch_playlist(videoId=video_id, limit=limit, radio=radio)
-    return [_track_summary(track) for track in watch.get("tracks", [])]
 
 
 @mcp.tool()
@@ -403,10 +379,6 @@ def search_music(query: str, filter: str = "songs", limit: int = 10) -> list[dic
                 "artists": ", ".join(a.get("name", "") for a in r.get("artists") or []),
                 "duration": r.get("duration"),
                 "thumbnail": _thumbnail_url(r),
-                "kind": "track" if r.get("videoId") else "playlist",
-                "playlistId": (r.get("browseId") or "").removeprefix("VL") if not r.get("videoId") else None,
-                "youtubeMusicUrl": (f"https://music.youtube.com/watch?v={r.get('videoId')}" if r.get("videoId") else f"https://music.youtube.com/playlist?list={(r.get('browseId') or '').removeprefix('VL')}"),
-                "playable": bool(r.get("videoId") or r.get("browseId")),
             }
         )
     return out
@@ -428,10 +400,6 @@ def list_my_playlists(limit: int = 50) -> list[dict[str, Any]]:
             "playlistId": p.get("playlistId"),
             "title": p.get("title"),
             "count": p.get("count"),
-            "kind": "playlist",
-            "thumbnail": _thumbnail_url(p),
-            "youtubeMusicUrl": f"https://music.youtube.com/playlist?list={p.get('playlistId')}",
-            "playable": bool(p.get("playlistId")),
         }
         for p in playlists
     ]
@@ -477,10 +445,6 @@ def get_playlist(playlist_id: str, limit: int | None = None) -> dict[str, Any]:
         "description": pl.get("description"),
         "privacy": pl.get("privacy"),
         "trackCount": pl.get("trackCount"),
-        "kind": "playlist",
-        "thumbnail": _thumbnail_url(pl),
-        "youtubeMusicUrl": f"https://music.youtube.com/playlist?list={pl.get('id') or playlist_id}",
-        "playable": True,
         "tracks": [_track_summary(t) for t in pl.get("tracks", [])],
     }
 
@@ -518,13 +482,13 @@ def open_music_manager_ui(limit: int = 100) -> CallToolResult:
     }
 )
 @log_tool_errors
-def get_playlist_tracks_ui(playlist_id: str, limit: int | None = None) -> CallToolResult:
-    """Show a playlist as an interactive track-list UI.
+def get_playlist_tracks_ui(playlist_id: str) -> CallToolResult:
+    """Show every track in a playlist as an interactive track-list UI.
 
     UI-capable clients render a fast, compact track list with metadata, filtering, and
     YouTube Music links. Other clients still receive text and structured data.
     """
-    playlist = get_playlist(playlist_id, limit=limit)
+    playlist = get_playlist(playlist_id, limit=None)
     track_count = len(playlist["tracks"])
     summary = (
         f"Playlist {playlist['title'] or playlist_id}: "
@@ -533,72 +497,6 @@ def get_playlist_tracks_ui(playlist_id: str, limit: int | None = None) -> CallTo
     return CallToolResult(
         content=[TextContent(type="text", text=summary)],
         structuredContent=playlist,
-    )
-
-
-@mcp.tool(meta={
-    **_MANAGER_TOOL_META,
-    "openai/toolInvocation/invoking": "Finding music…",
-    "openai/toolInvocation/invoked": "Music cards ready",
-})
-@log_tool_errors
-def show_music_ui(query: str, filter: str = "songs", limit: int = 10) -> CallToolResult:
-    """Find music or playlists and show interactive cards with Play, Copy, and Open actions."""
-    results = search_music(query, filter=filter, limit=limit)
-    data = {"view": "cards", "query": query, "results": results}
-    return CallToolResult(
-        content=[TextContent(type="text", text=f"Found {len(results)} result(s) for {query}.")],
-        structuredContent=data,
-    )
-
-
-@mcp.tool(meta={
-    **_MANAGER_TOOL_META,
-    "openai/toolInvocation/invoking": "Building your queue…",
-    "openai/toolInvocation/invoked": "Ready to play",
-})
-@log_tool_errors
-def play_music(video_ids: list[str], include_recommendations: bool = True, recommendation_limit: int = 15) -> CallToolResult:
-    """Play songs in the requested order, followed by related recommendations."""
-    requested = []
-    for video_id in video_ids:
-        resolved = _watch_tracks(video_id, limit=1)
-        requested.append(resolved[0] if resolved else {
-            "kind": "track", "videoId": video_id, "title": video_id, "artists": "",
-            "thumbnail": None, "youtubeMusicUrl": f"https://music.youtube.com/watch?v={video_id}",
-            "playable": True,
-        })
-    recommended = _watch_tracks(video_ids[-1], limit=min(max(recommendation_limit + 1, 1), 50), radio=True) if include_recommendations and video_ids else []
-    queue = _dedupe_tracks(requested + recommended)
-    data = {"view": "player", "source": "tracks", "requestedCount": len(requested), "queue": queue}
-    return CallToolResult(
-        content=[TextContent(type="text", text=f"Ready to play {len(requested)} requested track(s) and {max(0, len(queue) - len(requested))} recommendation(s).")],
-        structuredContent=data,
-    )
-
-
-@mcp.tool(meta={
-    **_MANAGER_TOOL_META,
-    "openai/toolInvocation/invoking": "Loading playlist player…",
-    "openai/toolInvocation/invoked": "Playlist ready to play",
-})
-@log_tool_errors
-def play_playlist(playlist_id: str, start_index: int = 0, include_recommendations: bool = True, recommendation_limit: int = 15) -> CallToolResult:
-    """Play a playlist in order, followed by related recommendations."""
-    playlist = get_playlist(playlist_id, limit=None)
-    tracks = playlist["tracks"]
-    if not tracks:
-        raise ValueError("Cannot play an empty playlist.")
-    if start_index < 0 or start_index >= len(tracks):
-        raise ValueError(f"start_index must be between 0 and {len(tracks) - 1}.")
-    requested = tracks[start_index:]
-    seed = requested[-1].get("videoId")
-    recommended = _watch_tracks(seed, limit=min(max(recommendation_limit + 1, 1), 50), radio=True) if include_recommendations and seed else []
-    queue = _dedupe_tracks(requested + recommended)
-    data = {"view": "player", "source": "playlist", "playlist": playlist, "requestedCount": len(requested), "queue": queue}
-    return CallToolResult(
-        content=[TextContent(type="text", text=f"Ready to play {playlist['title']} from track {start_index + 1}.")],
-        structuredContent=data,
     )
 
 
