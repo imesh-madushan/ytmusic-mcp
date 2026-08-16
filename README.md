@@ -30,7 +30,9 @@ If YouTube expires the browser session, a tool error supplies a short-lived priv
 Call `open_music_manager_ui` to open the full manager, or
 `get_playlist_tracks_ui` with a playlist ID to open a playlist directly. The
 React app supports listing, creating, editing, and deleting playlists; searching
-and adding music; filtering, bulk removal, and track reordering. It advertises
+and adding music; filtering, bulk removal, and track reordering. Music and playlist
+results also render as cards with Play, Copy link, and Open in YouTube Music actions.
+Playback preserves requested order and appends deduplicated radio recommendations. It advertises
 standard MCP Apps metadata and ChatGPT Apps compatibility. Hosts without UI support receive text and structured data.
 
 Artwork is limited to small thumbnails and is loaded lazily only for virtualized
@@ -208,6 +210,9 @@ Without `--run-youtube-integration`, these account-mutating tests are skipped.
 |---|---|
 | `reconnect_youtube_music` | Return a short-lived private setup URL for missing or expired YouTube browser credentials |
 | `search_music` | Search songs/videos/albums/artists/playlists |
+| `show_music_ui` | Show track or playlist cards with Play, Copy link, and Open actions |
+| `play_music` | Play requested video IDs in order, followed by optional recommendations |
+| `play_playlist` | Play a playlist from a chosen index, followed by optional recommendations |
 | `list_my_playlists` | List your playlists |
 | `get_playlist` | Get a playlist's tracks (includes `setVideoId`, needed for remove/reorder) |
 | `create_playlist` | Create a new playlist |
