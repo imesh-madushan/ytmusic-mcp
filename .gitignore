@@ -14,6 +14,9 @@ ENV/
 .env.*
 !.env.example
 browser.json
+oauth.sqlite3
+oauth.sqlite3-shm
+oauth.sqlite3-wal
 
 # Test, coverage, type-checker, and linter caches
 .pytest_cache/
@@ -29,6 +32,8 @@ htmlcov/
 # Build and package artifacts
 build/
 dist/
+!widgets/playlist-manager/dist/
+!widgets/playlist-manager/dist/index.html
 *.egg-info/
 .eggs/
 

@@ -35,6 +35,7 @@ class Settings:
     db_path: Path
     secret_key: str  # Fernet key that encrypts stored YouTube cookies
     local_auth_file: Path  # cookie headers used in stdio mode
+    force_ipv4: bool  # keep outbound requests on IPv4 (avoids stalls on hosts without IPv6)
     log_level: str
     library_log_level: str
     static_client: StaticClient | None
@@ -92,9 +93,13 @@ def settings_from_env(env: Mapping[str, str]) -> Settings:
         host=env.get("MCP_HOST", "127.0.0.1"),
         port=port,
         public_url=env.get("MCP_PUBLIC_URL", "").strip().rstrip("/"),
-        db_path=Path(env.get("YTMUSIC_DB_PATH", PROJECT_DIR / "data" / "ytmusic-mcp.db")).resolve(),
-        secret_key=env.get("YTMUSIC_SECRET_KEY", "").strip(),
+        db_path=Path(
+            env.get("YTMUSIC_DB_PATH") or env.get("OAUTH_DB_PATH") or PROJECT_DIR / "data" / "ytmusic-mcp.db"
+        ).resolve(),
+        # YTMUSIC_CREDENTIAL_KEY / OAUTH_DB_PATH are the names older deployments used.
+        secret_key=(env.get("YTMUSIC_SECRET_KEY") or env.get("YTMUSIC_CREDENTIAL_KEY") or "").strip(),
         local_auth_file=Path(env.get("YTMUSIC_AUTH_FILE", PROJECT_DIR / "browser.json")).resolve(),
+        force_ipv4=env.get("MCP_FORCE_IPV4", "1").lower() not in ("0", "false", "no"),
         log_level=env.get("YTMUSIC_LOG_LEVEL", "INFO").upper(),
         library_log_level=env.get("MCP_LIBRARY_LOG_LEVEL", "INFO").upper(),
         static_client=_parse_static_client(env),

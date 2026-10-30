@@ -57,3 +57,19 @@ def test_static_client_needs_all_three_values():
         }
     )
     assert settings.static_client.redirect_uris == ["https://a/cb", "https://b/cb"]
+
+
+def test_older_environment_variable_names_are_still_accepted():
+    settings = settings_from_env(
+        {"YTMUSIC_CREDENTIAL_KEY": "old-key", "OAUTH_DB_PATH": "/data/oauth.sqlite3"}
+    )
+    assert settings.secret_key == "old-key"
+    assert settings.db_path.name == "oauth.sqlite3"
+    # The new names win when both are present.
+    both = settings_from_env({"YTMUSIC_SECRET_KEY": "new", "YTMUSIC_CREDENTIAL_KEY": "old"})
+    assert both.secret_key == "new"
+
+
+def test_force_ipv4_defaults_on_and_can_be_disabled():
+    assert settings_from_env({}).force_ipv4 is True
+    assert settings_from_env({"MCP_FORCE_IPV4": "0"}).force_ipv4 is False

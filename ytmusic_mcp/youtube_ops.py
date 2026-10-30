@@ -34,6 +34,29 @@ def _artist_names(item: dict[str, Any]) -> str:
     return ", ".join(artist.get("name", "") for artist in item.get("artists") or [])
 
 
+def thumbnail_url(item: dict[str, Any], target_width: int = 120) -> str | None:
+    """Pick the smallest artwork URL that is still at least ``target_width`` wide."""
+    thumbnails = (
+        item.get("thumbnails")
+        or (item.get("thumbnail") or {}).get("thumbnails")
+        or ((item.get("videoDetails") or {}).get("thumbnail") or {}).get("thumbnails")
+        or []
+    )
+    candidates = [thumb for thumb in thumbnails if thumb.get("url")]
+    if not candidates:
+        return None
+    sized = [thumb for thumb in candidates if isinstance(thumb.get("width"), int)]
+    if not sized:
+        return candidates[0]["url"]
+    big_enough = [thumb for thumb in sized if thumb["width"] >= target_width]
+    chosen = (
+        min(big_enough, key=lambda thumb: thumb["width"])
+        if big_enough
+        else max(sized, key=lambda thumb: thumb["width"])
+    )
+    return chosen["url"]
+
+
 def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
     return {
         "videoId": track.get("videoId"),
@@ -42,6 +65,7 @@ def _track_summary(track: dict[str, Any]) -> dict[str, Any]:
         "artists": _artist_names(track),
         "album": (track.get("album") or {}).get("name"),
         "duration": track.get("duration"),
+        "thumbnail": thumbnail_url(track),
     }
 
 
@@ -69,6 +93,7 @@ def search_music(
             "title": item.get("title"),
             "artists": _artist_names(item),
             "duration": item.get("duration"),
+            "thumbnail": thumbnail_url(item),
         }
         for item in yt.search(query, filter=filter, limit=limit)[:limit]
     ]
@@ -108,13 +133,13 @@ def _fetch_playlist(yt: YTMusic, playlist_id: str, limit: int | None) -> dict[st
         }
 
 
-def get_playlist(yt: YTMusic, playlist_id: str, limit: int = 200) -> dict[str, Any]:
-    """Get a playlist's metadata and its ordered tracks.
+def get_playlist(yt: YTMusic, playlist_id: str, limit: int | None = None) -> dict[str, Any]:
+    """Get a playlist's metadata and its ordered tracks (all of them unless limit is set).
 
     Each track includes 'setVideoId', the ID that remove_tracks_from_playlist and
     the move/reorder tools need (NOT videoId).
     """
-    playlist = _fetch_playlist(yt, playlist_id, _clamp_limit(limit))
+    playlist = _fetch_playlist(yt, playlist_id, None if limit is None else max(1, limit))
     return {
         "playlistId": playlist.get("id"),
         "title": playlist.get("title"),

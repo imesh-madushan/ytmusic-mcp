@@ -58,22 +58,23 @@ server {
         proxy_read_timeout 3600s;
     }
 
-    # Password attempts get the strictest limit.
-    location = /login/callback {
+    # Password attempts and header submissions get the strictest limit.
+    location ~ ^/(login|youtube-auth)/callback$ {
         limit_req zone=login_limit burst=5 nodelay;
         proxy_pass http://127.0.0.1:${MCP_PORT};
         proxy_set_header X-Real-IP $remote_addr;
     }
 
-    # OAuth: dynamic client registration, authorization, tokens, revocation, login page.
-    location ~ ^/(register|authorize|token|revoke|login)$ {
+    # OAuth: dynamic client registration, authorization, tokens, revocation, login page,
+    # and the page where a user pastes fresh YouTube headers.
+    location ~ ^/(register|authorize|token|revoke|login|youtube-auth)$ {
         limit_req zone=oauth_limit burst=20 nodelay;
         proxy_pass http://127.0.0.1:${MCP_PORT};
         proxy_set_header X-Real-IP $remote_addr;
     }
 
-    # OAuth discovery metadata.
-    location ~ ^/\.well-known/(oauth-protected-resource/ytmusic-mcp|oauth-authorization-server)$ {
+    # OAuth discovery metadata (ChatGPT also probes the fallback URLs; the app answers them with a 404).
+    location ~ ^/\.well-known/(oauth-protected-resource/ytmusic-mcp|oauth-authorization-server(/ytmusic-mcp)?|openid-configuration)$ {
         proxy_pass http://127.0.0.1:${MCP_PORT};
     }
 

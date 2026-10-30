@@ -27,7 +27,7 @@ cd "$APP_DIR"
 echo "==> Installing into $APP_DIR/.venv"
 python3 -m venv .venv
 .venv/bin/pip install --quiet --upgrade pip
-.venv/bin/pip install --quiet .
+.venv/bin/pip install --quiet -e .
 
 if [[ ! -f .env ]]; then
   echo "==> Creating .env"

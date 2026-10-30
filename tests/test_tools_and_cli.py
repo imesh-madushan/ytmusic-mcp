@@ -5,34 +5,15 @@ import json
 import pytest
 from conftest import FAKE_HEADERS
 
-from ytmusic_mcp import cli
+from ytmusic_mcp import app, cli
 from ytmusic_mcp.app import build_http_server, build_stdio_server
 from ytmusic_mcp.config import settings_from_env
 from ytmusic_mcp.security import generate_secret_key
 from ytmusic_mcp.store import Store
 
 
-@pytest.mark.anyio
-async def test_tools_hide_the_client_parameter_and_declare_hints():
-    tools = {tool.name: tool for tool in await build_stdio_server(settings_from_env({})).list_tools()}
-
-    assert len(tools) == 11
-    for tool in tools.values():
-        assert "yt" not in tool.input_schema["properties"]
-        assert tool.description
-    assert tools["delete_playlist"].annotations.destructive_hint is True
-    assert tools["search_music"].annotations.read_only_hint is True
-    assert tools["search_music"].input_schema["properties"]["filter"]["enum"][0] == "songs"
-    assert tools["create_playlist"].input_schema["properties"]["privacy_status"]["enum"] == [
-        "PUBLIC",
-        "PRIVATE",
-        "UNLISTED",
-    ]
-
-
-@pytest.mark.anyio
-async def test_http_server_builds_with_oauth_routes(tmp_path):
-    settings = settings_from_env(
+def http_settings(tmp_path):
+    return settings_from_env(
         {
             "MCP_TRANSPORT": "http",
             "MCP_PUBLIC_URL": "https://mcp.example.com/ytmusic-mcp",
@@ -40,9 +21,45 @@ async def test_http_server_builds_with_oauth_routes(tmp_path):
             "YTMUSIC_DB_PATH": str(tmp_path / "db.sqlite"),
         }
     )
-    app = build_http_server(settings).streamable_http_app(host="127.0.0.1")
-    paths = {route.path for route in app.routes}
-    assert {"/login", "/login/callback", "/authorize", "/token", "/register"} <= paths
+
+
+@pytest.mark.anyio
+async def test_tools_hide_the_client_parameter_and_declare_hints():
+    tools = {tool.name: tool for tool in await build_stdio_server(settings_from_env({})).list_tools()}
+
+    assert len(tools) == 13
+    for tool in tools.values():
+        assert "yt" not in tool.inputSchema["properties"]
+        assert tool.description
+    assert tools["delete_playlist"].annotations.destructiveHint is True
+    assert tools["remove_tracks_from_playlist"].annotations.destructiveHint is True
+    assert tools["search_music"].annotations.readOnlyHint is True
+    assert tools["search_music"].inputSchema["properties"]["filter"]["enum"][0] == "songs"
+    assert tools["create_playlist"].inputSchema["properties"]["privacy_status"]["enum"] == [
+        "PUBLIC",
+        "PRIVATE",
+        "UNLISTED",
+    ]
+    assert "reconnect_youtube_music" not in tools  # only meaningful when users connect via the browser
+
+
+@pytest.mark.anyio
+async def test_http_server_adds_the_reconnect_tool_and_login_routes(tmp_path):
+    mcp = build_http_server(http_settings(tmp_path))
+    assert "reconnect_youtube_music" in {tool.name for tool in await mcp.list_tools()}
+    paths = {route.path for route in mcp.streamable_http_app().routes}
+    assert {"/login", "/login/callback", "/youtube-auth", "/youtube-auth/callback"} <= paths
+    assert {"/authorize", "/token", "/register", "/revoke"} <= paths
+
+
+def test_force_ipv4_is_applied_unless_disabled(monkeypatch):
+    import socket
+
+    from urllib3.util import connection
+
+    monkeypatch.setattr(connection, "allowed_gai_family", connection.allowed_gai_family)
+    app.configure_runtime(settings_from_env({"MCP_FORCE_IPV4": "1"}))
+    assert connection.allowed_gai_family() == socket.AF_INET
 
 
 @pytest.fixture

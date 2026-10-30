@@ -7,3 +7,4 @@ browser.json
 data
 deploy/out
 tests
+widgets/*/node_modules

@@ -50,6 +50,7 @@ def test_get_playlist_summarizes_tracks(yt):
         "artists": "A",
         "album": "Al",
         "duration": None,
+        "thumbnail": None,
     }
 
 

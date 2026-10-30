@@ -18,8 +18,9 @@ from pathlib import Path
 
 from ytmusicapi import YTMusic
 
-from .accounts import AccountError, build_auth_headers, encrypt_headers, headers_from_text
 from .config import ConfigError, Settings, load_settings
+from .errors import AccountError
+from .headers import build_auth_headers, encrypt_headers, headers_from_text
 from .security import CookieVault, generate_secret_key, hash_password
 from .store import Store
 

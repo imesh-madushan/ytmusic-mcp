@@ -6,7 +6,10 @@ RUN useradd --create-home --uid 10001 app \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY ytmusic_mcp ./ytmusic_mcp
-RUN pip install --no-cache-dir .
+COPY assets ./assets
+COPY widgets ./widgets
+# Editable, so the app finds assets/ and widgets/ next to the code.
+RUN pip install --no-cache-dir -e .
 
 USER app
 # Inside a container the app must listen on all interfaces; docker-compose.yml

@@ -5,13 +5,9 @@ from conftest import FAKE_HEADERS
 from ytmusicapi.exceptions import YTMusicServerError
 
 from ytmusic_mcp import accounts
-from ytmusic_mcp.accounts import (
-    AccountError,
-    AccountRegistry,
-    build_auth_headers,
-    encrypt_headers,
-    headers_from_text,
-)
+from ytmusic_mcp.accounts import AccountRegistry
+from ytmusic_mcp.errors import AccountError
+from ytmusic_mcp.headers import encrypt_headers
 from ytmusic_mcp.security import hash_password
 
 
@@ -29,41 +25,6 @@ def registry_for(username, store, vault, tmp_path):
     reg = AccountRegistry(tmp_path / "browser.json", store, vault)
     reg.current_username = lambda: username
     return reg
-
-
-def test_headers_from_existing_browser_json():
-    assert headers_from_text(json.dumps(FAKE_HEADERS)) == FAKE_HEADERS
-
-
-def test_headers_from_firefox_export():
-    export = {"requestHeaders": {"headers": [{"name": k, "value": v} for k, v in FAKE_HEADERS.items()]}}
-    headers = headers_from_text(json.dumps(export))
-    assert headers["cookie"] == FAKE_HEADERS["cookie"]
-
-
-def test_headers_from_garbage_is_a_clear_error():
-    with pytest.raises(AccountError):
-        headers_from_text("this is not headers")
-
-
-@pytest.mark.parametrize(
-    "broken, message",
-    [
-        ({"cookie": "a=b"}, "not browser-cookie"),
-        ({"cookie": "a=b", "x-goog-authuser": "0"}, "Origin"),
-        (
-            {"cookie": "a=b", "x-goog-authuser": "0", "origin": "https://music.youtube.com"},
-            "__Secure-3PAPISID",
-        ),
-    ],
-)
-def test_incomplete_headers_are_rejected(broken, message):
-    with pytest.raises(AccountError, match=message):
-        build_auth_headers(broken)
-
-
-def test_build_auth_headers_adds_authorization():
-    assert build_auth_headers(FAKE_HEADERS)["authorization"].startswith("SAPISIDHASH ")
 
 
 def test_each_user_gets_their_own_client(store, vault, tmp_path):
@@ -139,3 +100,16 @@ async def test_rejected_cookies_are_evicted_and_explained(store, vault, tmp_path
     with pytest.raises(AccountError, match="expired"):
         await registry.call(expired)
     assert "alice" not in registry._clients
+    assert store.get_user("alice").cookies is None  # the next login asks for fresh ones
+
+
+def test_errors_carry_a_reconnect_link_when_one_is_available(store, vault, tmp_path):
+    store.create_user("alice", hash_password("x"))
+    registry = AccountRegistry(
+        tmp_path / "unused.json",
+        store,
+        vault,
+        reconnect_url=lambda user: f"https://mcp.example.com/youtube-auth?ticket={user}",
+    )
+    with pytest.raises(AccountError, match=r"youtube-auth\?ticket=alice"):
+        registry.client_for("alice")

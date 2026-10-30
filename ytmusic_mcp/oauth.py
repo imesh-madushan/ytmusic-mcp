@@ -2,14 +2,16 @@
 
 The MCP SDK owns protocol validation, client authentication, PKCE verification,
 metadata and endpoint responses. This provider supplies what the SDK leaves to
-us: the resource-owner login page (which also acts as the consent screen) and
-storage for clients, authorization codes and tokens.
+us: the resource-owner login (which doubles as the consent screen), the step
+where a user connects their YouTube cookies, and storage for clients,
+authorization codes and tokens.
 
-Each token's ``subject`` is the username that logged in, which is how the tools
-later find that user's YouTube account.
+A user logs in with their password. If YouTube cookies are already stored for
+them the grant completes at once; otherwise they are asked to paste fresh
+request headers first. A token's ``subject`` is the username, which is how the
+tools later find that user's YouTube account.
 """
 
-import html
 import secrets
 import time
 from urllib.parse import urlparse
@@ -27,65 +29,27 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import AnyUrl
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.responses import RedirectResponse, Response
 
 from .config import StaticClient
-from .security import DUMMY_PASSWORD_HASH, hash_token, verify_password
-from .store import Store
+from .errors import AccountError
+from .headers import encrypt_headers, headers_from_text
+from .pages import BASE_HEADERS, PLAIN_CSP, connected_page, message_page, render_page
+from .security import DUMMY_PASSWORD_HASH, CookieVault, hash_token, verify_password
+from .store import PendingLogin, Store
 
 LOGIN_REQUEST_TTL = 600  # seconds the login page stays valid
+RECONNECT_TICKET_TTL = 600
 AUTH_CODE_TTL = 300
 ACCESS_TOKEN_TTL = 3600
 REFRESH_TOKEN_TTL = 30 * 24 * 3600
 MAX_LOGIN_ATTEMPTS = 5  # wrong passwords allowed per login request
 MAX_DYNAMIC_CLIENTS = 200  # caps what anonymous /register calls can store
-
-# The login page must never be framed (clickjacking) or cached, and has no scripts.
-PAGE_HEADERS = {
-    "Cache-Control": "no-store",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
-}
-
-PAGE_TEMPLATE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-body{{font:16px system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem}}
-label{{display:block;margin-top:1rem}}
-input{{box-sizing:border-box;width:100%;padding:.7rem;margin-top:.25rem}}
-button{{margin-top:1.25rem;padding:.7rem 1rem}}
-.client{{padding:.75rem 1rem;background:#f3f3f3;border-radius:.4rem;color:#222}}
-.error{{color:#b00020}}
-</style></head><body>{body}</body></html>"""
-
-LOGIN_BODY = """<h1>Authorize access</h1>
-<p class="client"><strong>{client_name}</strong><br>wants to manage the playlists on your
-YouTube Music account and will send you back to <strong>{redirect_host}</strong>.</p>
-<p>Only continue if you started this connection yourself.</p>
-{error}
-<form action="/login/callback" method="post">
-<input type="hidden" name="state" value="{state}">
-<label>Username<input name="username" autocomplete="username" required></label>
-<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-<button type="submit">Authorize</button>
-</form>"""
-
-
-def _page(title: str, body: str, status_code: int = 200) -> HTMLResponse:
-    return HTMLResponse(
-        PAGE_TEMPLATE.format(title=html.escape(title), body=body),
-        status_code=status_code,
-        headers=PAGE_HEADERS,
-    )
-
-
-def _message_page(message: str, status_code: int) -> HTMLResponse:
-    return _page(
-        "Authorization error", f"<h1>Authorization error</h1><p>{html.escape(message)}</p>", status_code
-    )
+EXPIRED_REQUEST = "This authorization request is invalid or has expired."
+HEADERS_REJECTED = (
+    "Those headers could not be read or are missing required YouTube fields. "
+    "Copy a fresh request made by music.youtube.com and try again."
+)
 
 
 class ResourceRefreshToken(RefreshToken):
@@ -97,12 +61,13 @@ class ResourceRefreshToken(RefreshToken):
 class SQLiteOAuthProvider(
     OAuthAuthorizationServerProvider[AuthorizationCode, ResourceRefreshToken, AccessToken]
 ):
-    """Multi-user OAuth provider: users and tokens live in SQLite."""
+    """Multi-user OAuth provider: users, cookies and tokens live in SQLite."""
 
-    def __init__(self, store: Store, issuer_url: str, scope: str):
+    def __init__(self, store: Store, issuer_url: str, scope: str, vault: CookieVault):
         self.store = store
         self.issuer_url = issuer_url.rstrip("/")
         self.scope = scope
+        self.vault = vault
 
     def add_static_client(self, static: StaticClient) -> None:
         """Register a confidential client configured by the server owner."""
@@ -134,7 +99,7 @@ class SQLiteOAuthProvider(
             )
         self.store.save_client(client_info.client_id, client_info.model_dump_json())
 
-    # -- authorization: login page and consent -----------------------------------
+    # -- step 1: authorize, then log in --------------------------------------------
 
     async def authorize(self, client: OAuthClientInformationFull, params: AuthorizationParams) -> str:
         """Park the request and send the browser to our login page."""
@@ -144,38 +109,43 @@ class SQLiteOAuthProvider(
         )
         return f"{self.issuer_url}/login?state={state}"
 
+    async def _client_details(self, client_id: str) -> tuple[str, str]:
+        """Name and redirect host to show, so the user can see who is asking."""
+        client = await self.get_client(client_id)
+        if client is None:
+            return client_id, ""
+        redirect_host = urlparse(str(client.redirect_uris[0])).netloc if client.redirect_uris else ""
+        return client.client_name or client_id, redirect_host
+
+    async def _login_form(
+        self, state: str, client_id: str, error: str | None = None, status_code: int = 200
+    ) -> Response:
+        client_name, redirect_host = await self._client_details(client_id)
+        return render_page(
+            "login",
+            state=state,
+            client_name=client_name,
+            redirect_host=redirect_host,
+            error=error,
+            status_code=status_code,
+        )
+
     async def login_page(self, state: str) -> Response:
         pending = self.store.get_pending(hash_token(state))
         if pending is None:
-            return _message_page("This authorization request is invalid or has expired.", 400)
-        return await self._render_login(state, pending.client_id)
-
-    async def _render_login(
-        self, state: str, client_id: str, error: str = "", status_code: int = 200
-    ) -> Response:
-        client = await self.get_client(client_id)
-        client_name = (client.client_name if client else None) or client_id
-        redirect_host = (
-            urlparse(str(client.redirect_uris[0])).netloc if client and client.redirect_uris else "?"
-        )
-        body = LOGIN_BODY.format(
-            client_name=html.escape(client_name),
-            redirect_host=html.escape(redirect_host),
-            state=html.escape(state, quote=True),
-            error=f'<p class="error">{html.escape(error)}</p>' if error else "",
-        )
-        return _page("Authorize access", body, status_code)
+            return message_page(EXPIRED_REQUEST)
+        return await self._login_form(state, pending.client_id)
 
     async def login_submit(self, request: Request) -> Response:
         form = await request.form()
         state, username, password = (form.get(name) for name in ("state", "username", "password"))
         if not all(isinstance(value, str) for value in (state, username, password)):
-            return _message_page("The login form was incomplete.", 400)
+            return message_page("The login form was incomplete.")
 
         state_hash = hash_token(state)
         pending = self.store.get_pending(state_hash)
         if pending is None:
-            return _message_page("This authorization request is invalid or has expired.", 400)
+            return message_page(EXPIRED_REQUEST)
 
         # Always run a hash check, even for unknown users, so timing reveals nothing.
         user = self.store.get_user(username)
@@ -183,11 +153,67 @@ class SQLiteOAuthProvider(
         if user is None or not password_ok:
             if self.store.record_failed_login(state_hash) >= MAX_LOGIN_ATTEMPTS:
                 self.store.delete_pending(state_hash)
-                return _message_page(
+                return message_page(
                     "Too many failed attempts. Start the connection again from your client.", 429
                 )
-            return await self._render_login(state, pending.client_id, "Invalid username or password.", 401)
+            return await self._login_form(state, pending.client_id, "Invalid username or password.", 401)
 
+        self.store.mark_pending_authenticated(state_hash, user.username)
+        if user.cookies is None:
+            return render_page("youtube", state=state)
+        return self._finish_authorization(state_hash, pending, user.username)
+
+    # -- step 2: connect YouTube cookies (new users, or after they expire) -----------
+
+    def reconnect_url(self, username: str) -> str:
+        """A short-lived, single-use link where ``username`` can paste fresh headers."""
+        ticket = secrets.token_urlsafe(32)
+        self.store.save_reconnect_ticket(hash_token(ticket), username, time.time() + RECONNECT_TICKET_TTL)
+        return f"{self.issuer_url}/youtube-auth?ticket={ticket}"
+
+    async def youtube_page(self, state: str, ticket: str) -> Response:
+        if state:
+            pending = self.store.get_pending(hash_token(state))
+            if pending is None or pending.username is None:
+                return message_page(EXPIRED_REQUEST)
+        elif self.store.get_reconnect_ticket(hash_token(ticket)) is None:
+            return message_page("This reconnect link is invalid or has expired.")
+        return render_page("youtube", state=state, ticket=ticket)
+
+    async def youtube_submit(self, request: Request) -> Response:
+        form = await request.form()
+        state, ticket, raw_headers = (form.get(name, "") for name in ("state", "ticket", "headers"))
+        if (
+            not all(isinstance(value, str) for value in (state, ticket, raw_headers))
+            or not raw_headers.strip()
+        ):
+            return message_page("Paste the YouTube Music request headers.")
+
+        pending: PendingLogin | None = None
+        if state:
+            pending = self.store.get_pending(hash_token(state))
+            if pending is None or pending.username is None:
+                return message_page("Sign in with your password before connecting YouTube Music.", 403)
+            username = pending.username
+        else:
+            username = self.store.get_reconnect_ticket(hash_token(ticket))
+            if username is None:
+                return message_page("This reconnect link is invalid or has expired.")
+
+        try:
+            encrypted = encrypt_headers(headers_from_text(raw_headers), self.vault)
+        except AccountError:
+            return render_page("youtube", state=state, ticket=ticket, error=HEADERS_REJECTED, status_code=400)
+        self.store.set_cookies(username, encrypted)
+
+        if pending is not None:
+            return self._finish_authorization(hash_token(state), pending, username)
+        self.store.delete_reconnect_ticket(hash_token(ticket))
+        return connected_page()
+
+    # -- step 3: issue the authorization code ---------------------------------------------
+
+    def _finish_authorization(self, state_hash: str, pending: PendingLogin, username: str) -> Response:
         params = AuthorizationParams.model_validate_json(pending.params)
         code = secrets.token_urlsafe(32)
         authorization = AuthorizationCode(
@@ -199,7 +225,7 @@ class SQLiteOAuthProvider(
             scopes=params.scopes or [self.scope],
             code_challenge=params.code_challenge,
             resource=params.resource,
-            subject=user.username,
+            subject=username,
         )
         self.store.save_auth_code(
             hash_token(code), pending.client_id, authorization.model_dump_json(), authorization.expires_at
@@ -208,10 +234,8 @@ class SQLiteOAuthProvider(
         return RedirectResponse(
             construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state),
             status_code=302,
-            headers=PAGE_HEADERS,
+            headers={**BASE_HEADERS, "Content-Security-Policy": PLAIN_CSP},
         )
-
-    # -- authorization code exchange ---------------------------------------------
 
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str

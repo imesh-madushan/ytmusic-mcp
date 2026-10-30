@@ -32,8 +32,15 @@ CREATE TABLE IF NOT EXISTS pending_logins (
     state_hash TEXT PRIMARY KEY,
     client_id  TEXT NOT NULL,
     params     TEXT NOT NULL,      -- AuthorizationParams as JSON
+    username   TEXT,               -- set once the password was accepted
     attempts   INTEGER NOT NULL DEFAULT 0,
     expires_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reconnect_tickets (
+    ticket_hash TEXT PRIMARY KEY,
+    username    TEXT NOT NULL,
+    expires_at  REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS auth_codes (
@@ -73,6 +80,7 @@ class User:
 class PendingLogin:
     client_id: str
     params: str
+    username: str | None  # None until the password has been accepted
     attempts: int
 
 
@@ -91,18 +99,33 @@ class Store:
 
     def __init__(self, path: Path):
         self.path = path
+        new_directory = not path.parent.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(path.parent, 0o700)
-        except OSError:
-            pass
+        if new_directory:  # never change the permissions of a directory that already existed
+            try:
+                os.chmod(path.parent, 0o700)
+            except OSError:
+                pass
         with self._connect() as db:
+            self._refuse_legacy_database(db)
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
         try:
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+    def _refuse_legacy_database(self, db: sqlite3.Connection) -> None:
+        """The pre-package server used a different layout; do not run on top of it."""
+        legacy = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name IN ('schema_metadata', 'oauth_users')"
+        ).fetchone()
+        if legacy:
+            raise RuntimeError(
+                f"{self.path} was created by an older version of this server and has a different "
+                "layout. Point YTMUSIC_DB_PATH at a new file and re-add your users "
+                "(python -m ytmusic_mcp.cli add-user)."
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -155,10 +178,18 @@ class Store:
             )
             return cursor.rowcount > 0
 
+    def clear_cookies(self, username: str) -> None:
+        """Forget cookies that YouTube rejected, so the next login asks for fresh ones."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE users SET cookies = NULL, updated_at = ? WHERE username = ?", (time.time(), username)
+            )
+
     def delete_user(self, username: str) -> bool:
         """Delete a user and revoke everything that user was issued."""
         with self._connect() as db:
             db.execute("DELETE FROM tokens WHERE username = ?", (username,))
+            db.execute("DELETE FROM reconnect_tickets WHERE username = ?", (username,))
             return db.execute("DELETE FROM users WHERE username = ?", (username,)).rowcount > 0
 
     # -- OAuth clients ---------------------------------------------------------
@@ -192,11 +223,18 @@ class Store:
     def get_pending(self, state_hash: str) -> PendingLogin | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT client_id, params, attempts FROM pending_logins "
+                "SELECT client_id, params, username, attempts FROM pending_logins "
                 "WHERE state_hash = ? AND expires_at > ?",
                 (state_hash, time.time()),
             ).fetchone()
-            return PendingLogin(row["client_id"], row["params"], row["attempts"]) if row else None
+            if row is None:
+                return None
+            return PendingLogin(row["client_id"], row["params"], row["username"], row["attempts"])
+
+    def mark_pending_authenticated(self, state_hash: str, username: str) -> None:
+        """Remember that this login request passed the password check."""
+        with self._connect() as db:
+            db.execute("UPDATE pending_logins SET username = ? WHERE state_hash = ?", (username, state_hash))
 
     def record_failed_login(self, state_hash: str) -> int:
         """Count a failed password attempt and return the new total."""
@@ -232,6 +270,28 @@ class Store:
     def delete_auth_code(self, code_hash: str) -> None:
         with self._connect() as db:
             db.execute("DELETE FROM auth_codes WHERE code_hash = ?", (code_hash,))
+
+    # -- one-time links for replacing expired YouTube cookies --------------------
+
+    def save_reconnect_ticket(self, ticket_hash: str, username: str, expires_at: float) -> None:
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO reconnect_tickets (ticket_hash, username, expires_at) VALUES (?, ?, ?)",
+                (ticket_hash, username, expires_at),
+            )
+
+    def get_reconnect_ticket(self, ticket_hash: str) -> str | None:
+        """Return the username a ticket belongs to, if it has not expired."""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT username FROM reconnect_tickets WHERE ticket_hash = ? AND expires_at > ?",
+                (ticket_hash, time.time()),
+            ).fetchone()
+            return row["username"] if row else None
+
+    def delete_reconnect_ticket(self, ticket_hash: str) -> None:
+        with self._connect() as db:
+            db.execute("DELETE FROM reconnect_tickets WHERE ticket_hash = ?", (ticket_hash,))
 
     # -- access and refresh tokens ---------------------------------------------
 
@@ -289,7 +349,7 @@ class Store:
         """Drop expired rows and dynamic clients that have been unused for a long time."""
         now = time.time()
         with self._connect() as db:
-            for table in ("pending_logins", "auth_codes", "tokens"):
+            for table in ("pending_logins", "auth_codes", "tokens", "reconnect_tickets"):
                 db.execute(f"DELETE FROM {table} WHERE expires_at <= ?", (now,))
             db.execute(
                 "DELETE FROM oauth_clients WHERE is_static = 0 AND created_at < ? "
