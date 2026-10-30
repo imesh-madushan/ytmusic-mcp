@@ -68,7 +68,8 @@ class FakeRunner(Runner):
         tools=("systemctl", "caddy", "apt-get"),
     ):
         super().__init__(console, dry_run)
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[str, ...]] = []  # everything the wizard asked for
+        self.executed: list[tuple[str, ...]] = []  # what would really have run (not skipped by dry-run)
         self.installed: dict[str, str] = {}
         self.install_order: list[str] = []
         self.responses = dict(responses or {})
@@ -87,6 +88,7 @@ class FakeRunner(Runner):
             self.console.command(" ".join(argv))
             if self.dry_run:
                 return Result()
+        self.executed.append(tuple(argv))
         for prefix, result in self.responses.items():
             if tuple(argv[: len(prefix)]) == prefix:
                 return result() if callable(result) else result
@@ -102,6 +104,14 @@ class FakeRunner(Runner):
 
     def ran(self, *prefix: str) -> bool:
         return any(call[: len(prefix)] == prefix for call in self.calls)
+
+    def did(self, *prefix: str) -> bool:
+        """Like `ran`, but only counts commands that were really executed (not shown in a dry run)."""
+        return any(call[: len(prefix)] == prefix for call in self.executed)
+
+    def position(self, *prefix: str) -> int:
+        """Index of the first executed command with this prefix (for checking order)."""
+        return next(i for i, call in enumerate(self.executed) if call[: len(prefix)] == prefix)
 
 
 def healthy_services(**overrides) -> Services:

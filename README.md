@@ -127,6 +127,26 @@ Other commands: `list-users`, `set-password <name>`, `delete-user <name>` (also 
 
 When YouTube expires a session, the failing tool call returns a one-time link (valid 10 minutes) where only that user can paste fresh headers. The `reconnect_youtube_music` tool returns the same link on request.
 
+### 3. Keep it up to date
+
+Once the server is set up, `./deploy/install.sh` takes a command instead of asking setup questions. There are two ways to update, plus two small helpers:
+
+| Command | Use it for | What it does |
+|---|---|---|
+| `./deploy/install.sh update` | **Normal updates (quick)** | Pulls the latest code (fast-forward only), updates the Python packages, restarts the service, and checks it from the outside. No UI build, no config changes. |
+| `./deploy/install.sh rebuild` | **Full rebuild** | Updates the Python packages, **builds the Vite UI apps**, re-applies the systemd unit and the web server config (with the same backup, validation and automatic rollback as the setup), restarts, and checks. It works on the code that is already checked out; run `update` first if you want the newest code. |
+| `./deploy/install.sh restart` | After editing `.env` | Restarts the service and checks it answers. |
+| `./deploy/install.sh status` | Any time | Shows the version and whether the service, app, web server and public site are healthy. Needs no network access to GitHub, and exits with an error code when something is wrong, so it works from cron or monitoring. |
+
+`update` tells you when a rebuild is worthwhile: if the UI source or the files in `deploy/` changed, or when tools or the playlist UI changed and you should refresh the connector in your client.
+
+Good to know:
+
+- **Add `--dry-run`** to `update` or `rebuild` to see every step without changing anything.
+- **`update` is careful:** it refuses to run over local edits, stops with advice if the remote history was rewritten, and never merges.
+- **`rebuild` and the UI apps:** it needs Node.js 18+ (`npm`) to build. It builds only the apps whose build output is not committed to git (the sign-in page); the playlist UI ships prebuilt. Use `--build-all-ui` to rebuild that one too, or `--skip-ui` to skip building. On a small server (under 1.5 GB RAM with no swap) it warns first, because a Vite build can run out of memory; you can build on another computer and copy `widgets/<app>/dist/index.html` over.
+- **Other web servers:** `rebuild --proxy caddy|nginx|none` chooses what to re-apply; a web server it does not manage is left alone, and so are other people's Caddy sites.
+
 ### Or: Docker
 
 ```bash
@@ -137,7 +157,7 @@ docker compose exec ytmusic-mcp python -m ytmusic_mcp.cli add-user alice
 
 The port is published on `127.0.0.1` only; put Caddy, nginx or another reverse proxy in front for HTTPS (see `deploy/`). The database lives in the `ytmusic-data` volume.
 
-### 3. Connect from Claude or ChatGPT
+### 4. Connect from Claude or ChatGPT
 
 1. **Settings → Connectors → Add custom connector.**
 2. URL: `https://mcp.example.com/ytmusic-mcp` (the `MCP_PUBLIC_URL` you configured).

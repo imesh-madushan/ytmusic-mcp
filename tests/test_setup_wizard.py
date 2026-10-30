@@ -293,3 +293,11 @@ def test_username_and_password_validation():
 )
 def test_detect_proxy(listeners, expected):
     assert detect_proxy(listeners) == expected
+
+
+def test_rerunning_the_wizard_on_an_installed_server_no_longer_stops_at_caddy(tmp_path):
+    console, _ = make_console()
+    runner = caddy_machine(console)
+    runner.files[CADDY_PATH] = CADDYFILE + "\n" + proxy.caddy_site_block("mcp.example.com", 8787)
+    code, output, runner, _ = interactive_run(tmp_path, runner=runner)  # no --replace-site
+    assert code == 0 and "right settings" in output and CADDY_PATH not in runner.installed

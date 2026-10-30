@@ -11,6 +11,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +41,10 @@ OAUTH_PATHS = [
 SECRET_PATTERNS = [re.compile(r"\$2[aby]\$\d+\$[A-Za-z0-9./]+")]  # bcrypt hashes in basic-auth blocks
 
 
+# Every site block this tool writes contains this line, which is how it recognises its own work.
+OUR_MARKER = "@mcp path /ytmusic-mcp"
+
+
 class StepFailed(Exception):
     """A setup step could not be completed (and was undone where needed)."""
 
@@ -57,6 +62,15 @@ def render(template: str, **values: str) -> str:
 
 def caddy_site_block(domain: str, port: int) -> str:
     return render("caddy-site.template", MCP_DOMAIN=domain, MCP_PORT=str(port))
+
+
+def same_config(first: str, second: str) -> bool:
+    """Equal apart from indentation, blank lines and trailing spaces."""
+
+    def lines(text: str) -> list[str]:
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    return lines(first) == lines(second)
 
 
 def mask_secrets(text: str) -> str:
@@ -133,20 +147,26 @@ def configure_caddy(
     existing = find_site(original, domain)
     replace = False
     if existing:
-        console.warn(f"Caddy already serves {domain}:")
-        for line in mask_secrets(
-            "\n".join(original.splitlines()[existing.start : existing.end + 1])
-        ).splitlines()[:12]:
-            console.note(line)
-        replace = (
-            replace_existing
-            if replace_existing is not None
-            else console.confirm("Replace it? (a backup of the current file is kept)", default=False)
-        )
-        if not replace:
-            raise StepFailed(
-                f"{domain} is already used by another Caddy site; choose another domain or allow replacing it."
+        current = "\n".join(original.splitlines()[existing.start : existing.end + 1])
+        if same_config(current, caddy_site_block(domain, port)):
+            console.ok(f"Caddy already serves {domain} with the right settings")
+            return ""
+        if OUR_MARKER in current:
+            console.info(f"Updating the existing {domain} site for this app (a backup is kept)")
+            replace = True
+        else:
+            console.warn(f"Caddy already serves {domain}:")
+            for line in mask_secrets(current).splitlines()[:12]:
+                console.note(line)
+            replace = (
+                replace_existing
+                if replace_existing is not None
+                else console.confirm("Replace it? (a backup of the current file is kept)", default=False)
             )
+            if not replace:
+                raise StepFailed(
+                    f"{domain} is already used by another Caddy site; choose another domain or allow replacing it."
+                )
 
     new_text = with_site(original, domain, caddy_site_block(domain, port), replace)
     with tempfile.TemporaryDirectory(prefix="ytmusic-caddy-") as folder:
@@ -188,6 +208,20 @@ def configure_caddy(
             raise undo("Some ports that were open before the change are no longer listening.")
     console.ok("Caddy reloaded; your other sites are still listening")
     return backup
+
+
+def detect_proxy(listeners: dict[int, str]) -> str:
+    """Which web server already owns the public ports: caddy, nginx, other, or none."""
+    owner = listeners.get(443) or listeners.get(80)
+    if owner is None:
+        return "none"
+    name = owner.lower()
+    return "caddy" if "caddy" in name else "nginx" if "nginx" in name else "other"
+
+
+def listeners(runner: Runner) -> dict[int, str]:
+    """Listening TCP ports and their process names (may ask for the sudo password)."""
+    return parse_listeners(runner.run(["ss", "-tlnp"], sudo=True, read_only=True).stdout)
 
 
 # -- nginx ------------------------------------------------------------------------------------------
@@ -273,3 +307,25 @@ def check_public(domain: str) -> list[Check]:
         Check("Other paths are not exposed", unknown == 404, f"HTTP {unknown}"),
         Check("OAuth metadata is published", metadata == 200, f"HTTP {metadata}"),
     ]
+
+
+def wait_for_public(
+    console: Console,
+    check: Callable[[str], list[Check]],
+    sleep: Callable[[float], None],
+    domain: str,
+    attempts: int = 8,
+    delay: float = 5.0,
+) -> list[Check]:
+    """Check the public site, waiting while a new certificate is being issued, and print the results."""
+    results: list[Check] = []
+    for attempt in range(attempts):
+        results = check(domain)
+        if all(result.ok for result in results):
+            break
+        if attempt == 0:
+            console.note("Waiting for the HTTPS certificate…")
+        sleep(delay)
+    for result in results:
+        (console.ok if result.ok else console.fail)(f"{result.name} ({result.detail})")
+    return results

@@ -323,3 +323,38 @@ def test_non_linux_systems_are_told_what_to_do_instead(tmp_path):
         make_options(tmp_path), console, runner, healthy_services(system=lambda: "Darwin")
     ).execute()
     assert wizard_run == 1 and "for Linux servers" in out.getvalue() and "local-cookies" in out.getvalue()
+
+
+# -- the tool recognises its own Caddy block -------------------------------------------------------------
+
+
+def test_identical_own_block_is_left_alone():
+    console, out = make_console()
+    runner = caddy_runner(console)
+    runner.files[CADDY_PATH] = CADDYFILE + "\n" + proxy.caddy_site_block("mcp.example.com", 8787)
+    assert proxy.configure_caddy(runner, console, "mcp.example.com", 8787, replace_existing=None) == ""
+    assert runner.installed == {} and not runner.did("cp") and "right settings" in out.getvalue()
+
+
+def test_identical_block_is_recognised_despite_different_indentation():
+    reindented = proxy.caddy_site_block("mcp.example.com", 8787).replace("\t", "    ")
+    assert proxy.same_config(reindented, proxy.caddy_site_block("mcp.example.com", 8787))
+    assert not proxy.same_config(reindented, proxy.caddy_site_block("mcp.example.com", 9999))
+
+
+def test_own_older_block_is_updated_without_asking_and_with_a_backup():
+    console, _ = make_console()  # no scripted answers: any question would fail the test
+    runner = caddy_runner(console)
+    old_block = "mcp.example.com {\n\t@mcp path /ytmusic-mcp\n\trespond 200\n}\n"
+    runner.files[CADDY_PATH] = CADDYFILE + "\n" + old_block
+    backup = proxy.configure_caddy(runner, console, "mcp.example.com", 8787, replace_existing=False)
+    assert backup.startswith(CADDY_PATH + ".bak-") and "respond 200" not in runner.installed[CADDY_PATH]
+
+
+def test_a_foreign_block_with_a_similar_name_is_still_protected():
+    console, _ = make_console()
+    runner = caddy_runner(console)
+    runner.files[CADDY_PATH] = CADDYFILE + "\nmcp.example.com {\n\trespond 200\n}\n"  # no marker
+    with pytest.raises(StepFailed, match="already used"):
+        proxy.configure_caddy(runner, console, "mcp.example.com", 8787, replace_existing=False)
+    assert runner.installed == {}

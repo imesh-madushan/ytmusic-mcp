@@ -163,6 +163,23 @@ def cmd_setup(args: argparse.Namespace, settings: Settings) -> None:
         raise SystemExit(code)
 
 
+def cmd_manage(args: argparse.Namespace, settings: Settings) -> None:
+    """Maintenance of an installed server: status, restart, update (quick) or rebuild (full)."""
+    from .setup.manage import ManageOptions, run_manage
+
+    options = ManageOptions(
+        dry_run=getattr(args, "dry_run", False),
+        no_restart=getattr(args, "no_restart", False),
+        skip_ui=getattr(args, "skip_ui", False),
+        build_all_ui=getattr(args, "build_all_ui", False),
+        proxy=getattr(args, "proxy", "auto"),
+        caddyfile=getattr(args, "caddyfile", "/etc/caddy/Caddyfile"),
+    )
+    code = run_manage(args.command, options)
+    if code:
+        raise SystemExit(code)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m ytmusic_mcp.cli", description=__doc__.split("\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -212,6 +229,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup.add_argument("--skip-service", action="store_true", help="do not install the systemd service")
     setup.set_defaults(run=cmd_setup)
+
+    commands.add_parser(
+        "status", help="check that the service, web server and public site are healthy"
+    ).set_defaults(run=cmd_manage, command="status")
+    commands.add_parser("restart", help="restart the service and check it answers").set_defaults(
+        run=cmd_manage, command="restart"
+    )
+    update = commands.add_parser("update", help="quick: pull the latest code, update packages, restart")
+    update.add_argument(
+        "--dry-run", action="store_true", help="show what would happen without changing anything"
+    )
+    update.add_argument(
+        "--no-restart", action="store_true", help="pull and install, but do not restart the service"
+    )
+    update.set_defaults(run=cmd_manage, command="update")
+    rebuild = commands.add_parser(
+        "rebuild", help="full: packages, the Vite UI apps, service unit, web server config, then restart"
+    )
+    rebuild.add_argument(
+        "--dry-run", action="store_true", help="show what would happen without changing anything"
+    )
+    rebuild.add_argument("--skip-ui", action="store_true", help="do not build the Vite UI apps")
+    rebuild.add_argument(
+        "--build-all-ui", action="store_true", help="also rebuild UI apps whose build is committed to git"
+    )
+    rebuild.add_argument(
+        "--proxy", choices=["auto", "caddy", "nginx", "none"], default="auto", help="web server to re-apply"
+    )
+    rebuild.add_argument("--caddyfile", default="/etc/caddy/Caddyfile", help="path of the Caddyfile to edit")
+    rebuild.set_defaults(run=cmd_manage, command="rebuild")
     return parser
 
 

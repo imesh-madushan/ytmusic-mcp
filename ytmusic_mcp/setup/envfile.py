@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 ASSIGNMENT = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=(.*)$")
 
@@ -46,3 +47,24 @@ def set_env(path: Path, updates: dict[str, str], template: Path | None = None) -
         os.chmod(path, 0o600)
     except OSError:
         pass
+
+
+def public_domain(env: dict[str, str]) -> str | None:
+    """The host name from MCP_PUBLIC_URL, or None when it is missing or still the template value."""
+    url = env.get("MCP_PUBLIC_URL", "")
+    if not url or "yourdomain" in url:
+        return None
+    return urlparse(url).netloc or None
+
+
+def local_port(env: dict[str, str]) -> int:
+    try:
+        return int(env.get("MCP_PORT", "8787"))
+    except ValueError:
+        return 8787
+
+
+def database_path(project_dir: Path, env: dict[str, str]) -> Path:
+    """Where the SQLite database lives for this project's settings."""
+    configured = env.get("YTMUSIC_DB_PATH") or env.get("OAUTH_DB_PATH")
+    return Path(configured).expanduser() if configured else project_dir / "data" / "ytmusic-mcp.db"

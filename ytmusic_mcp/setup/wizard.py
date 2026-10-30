@@ -8,7 +8,6 @@ config, systemd) is shown first, backed up where it replaces something, and
 undone if it fails. `--dry-run` shows everything without changing anything.
 """
 
-import getpass
 import os
 import platform
 import re
@@ -23,9 +22,9 @@ from ..errors import AccountError
 from ..headers import encrypt_headers, headers_from_text
 from ..security import CookieVault, generate_secret_key, hash_password
 from ..store import Store
-from . import proxy
-from .envfile import read_env, set_env
-from .proxy import CADDYFILE, Check, StepFailed
+from . import proxy, service
+from .envfile import database_path, public_domain, read_env, set_env
+from .proxy import CADDYFILE, Check, StepFailed, detect_proxy
 from .system import (
     NETWORK_FILESYSTEMS,
     Runner,
@@ -39,8 +38,7 @@ from .system import (
 from .ui import Console
 
 TOTAL_STEPS = 6
-SERVICE_NAME = "ytmusic-mcp"
-UNIT_PATH = f"/etc/systemd/system/{SERVICE_NAME}.service"
+SERVICE_NAME = service.SERVICE_NAME
 PROXY_NAMES = {"caddy": "Caddy", "nginx": "nginx", "none": "no web server yet", "other": "another web server"}
 DOMAIN_PATTERN = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9._-]{2,32}$")
@@ -94,15 +92,6 @@ def validate_username(value: str) -> str | None:
 
 def validate_password(value: str) -> str | None:
     return None if len(value) >= 12 else "Use at least 12 characters."
-
-
-def detect_proxy(listeners: dict[int, str]) -> str:
-    """Which web server already owns the public ports."""
-    owner = listeners.get(443) or listeners.get(80)
-    if owner is None:
-        return "none"
-    name = owner.lower()
-    return "caddy" if "caddy" in name else "nginx" if "nginx" in name else "other"
 
 
 # -- the wizard ---------------------------------------------------------------------------------
@@ -205,10 +194,7 @@ class Wizard:
 
     def step_details(self) -> None:
         self.ui.step(2, TOTAL_STEPS, "Your details")
-        existing_url = self.env.get("MCP_PUBLIC_URL", "")
-        existing_domain = (
-            re.sub(r"^https?://([^/]+).*$", r"\1", existing_url) if "yourdomain" not in existing_url else ""
-        )
+        existing_domain = public_domain(self.env) or ""
         if self.o.yes:
             self.domain = (self.o.domain or existing_domain).lower()
             self.username = self.o.username or ""
@@ -274,9 +260,7 @@ class Wizard:
     # step 3 -----------------------------------------------------------------------------------
 
     def _db_path(self) -> Path:
-        merged = {**self.env, **getattr(self, "planned_env", {})}
-        merged.setdefault("YTMUSIC_DB_PATH", str(self.o.project_dir / "data" / "ytmusic-mcp.db"))
-        return Path(merged["YTMUSIC_DB_PATH"]).expanduser()
+        return database_path(self.o.project_dir, {**self.env, **getattr(self, "planned_env", {})})
 
     def step_configure(self) -> None:
         self.ui.step(3, TOTAL_STEPS, "Configuring the app")
@@ -433,33 +417,9 @@ class Wizard:
         if self.o.skip_service:
             self.ui.warn("Skipped. Start it yourself with: python -m ytmusic_mcp")
             return
-        unit = (proxy.DEPLOY_DIR / "ytmusic-mcp.service.template").read_text(encoding="utf-8")
-        data_dir = self._db_path().parent
-        for placeholder, value in (
-            ("@USER@", getpass.getuser()),
-            ("@APP_DIR@", str(self.o.project_dir)),
-            ("@DATA_DIR@", str(data_dir)),
-        ):
-            unit = unit.replace(placeholder, value)
-        if not self.run.install_file(unit, UNIT_PATH).ok:
-            raise StepFailed("Could not install the systemd unit.")
-        for command in (
-            ["systemctl", "daemon-reload"],
-            ["systemctl", "enable", SERVICE_NAME],
-            ["systemctl", "restart", SERVICE_NAME],
-        ):
-            if not self.run.run(command, sudo=True).ok:
-                raise StepFailed(f"'{' '.join(command)}' failed. See: journalctl -u {SERVICE_NAME} -n 40")
-        if self.o.dry_run:
-            return
-        for _ in range(10):  # the first start can take a few seconds
-            check = self.svc.check_local(self.port)
-            if check.ok:
-                self.ui.ok(f"The app is running on this machine ({check.detail})")
-                self.service_ok = True
-                return
-            self.svc.sleep(2)
-        raise StepFailed(f"The service did not start. See: journalctl -u {SERVICE_NAME} -n 40 --no-pager")
+        service.install_unit(self.run, self.o.project_dir, self._db_path().parent)
+        service.restart(self.run, self.ui, self.svc.check_local, self.svc.sleep, self.port)
+        self.service_ok = not self.o.dry_run
 
     # step 6 -----------------------------------------------------------------------------------
 
@@ -469,15 +429,7 @@ class Wizard:
         if self.o.dry_run or not self.proxy_done:
             self.ui.info("Skipped (nothing is published yet).")
         else:
-            for attempt in range(8):  # Caddy fetches the certificate on the first request
-                results = self.svc.check_public(self.domain)
-                if all(result.ok for result in results):
-                    break
-                if attempt == 0:
-                    self.ui.note("Waiting for the HTTPS certificate…")
-                self.svc.sleep(5)
-            for result in results:
-                (self.ui.ok if result.ok else self.ui.fail)(f"{result.name} ({result.detail})")
+            results = proxy.wait_for_public(self.ui, self.svc.check_public, self.svc.sleep, self.domain)
         healthy = bool(results) and all(result.ok for result in results)
         self._print_summary(healthy)
         return 0 if (healthy or self.o.dry_run or not self.proxy_done) else 1
