@@ -25,8 +25,8 @@ test = ["pytest>=8", "ruff>=0.6"]
 ytmusic-mcp = "ytmusic_mcp.app:main"
 ytmusic-mcp-admin = "ytmusic_mcp.cli:main"
 
-[tool.setuptools]
-packages = ["ytmusic_mcp"]
+[tool.setuptools.packages.find]
+include = ["ytmusic_mcp*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

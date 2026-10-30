@@ -74,24 +74,49 @@ Add to your Claude Desktop config (`claude_desktop_config.json`), using absolute
 
 Each user gets their own username, password and YouTube account. Tool calls always run as the user who logged in.
 
-### 1. Install on a Linux server
+### 1. Run the guided setup (Linux server)
+
+You need: a Linux server with Python 3.10+ (`python3-venv` on Debian/Ubuntu), a domain name that already points at it, and ports 80 and 443 open.
 
 ```bash
-git clone <this repo> && cd yt-mcp
-./deploy/install.sh --domain mcp.example.com
+git clone <this repo> && cd ytmusic-mcp
+./deploy/install.sh
 ```
 
-The script works from any directory and for any user. It creates a virtualenv, creates `.env` with a freshly generated `YTMUSIC_SECRET_KEY`, and renders the systemd and nginx files for your machine into `deploy/out/`. It prints the exact `sudo` commands for the remaining steps and never edits `/etc` itself.
+The script prepares a Python environment and starts a setup wizard that asks for your domain, a username and a password, shows what it is about to do, and then does it step by step:
 
-**Back up `YTMUSIC_SECRET_KEY`.** It encrypts every stored cookie; without it users must reconnect YouTube.
+1. **Checks the machine:** Python, memory, whether the database folder is on a network disk (SQLite must not be), DNS, and which web server already uses ports 80/443.
+2. **Configures the app:** writes `.env` (with a freshly generated encryption key), creates your first user, and can store your YouTube headers right away.
+3. **Sets up HTTPS and the web server:**
+   - **Caddy** (recommended; it gets certificates itself): your site is added to the Caddyfile. If Caddy is already serving other sites, nothing existing is changed: the file is backed up, the change is validated first, applied with a graceful reload, checked, and **restored automatically** if anything looks wrong. If no web server is installed, it offers to install Caddy (Debian/Ubuntu).
+   - **nginx:** gets the certificate first, then installs the site.
+   - **Anything else:** it prints exactly which paths to forward, and a ready-made Caddy/nginx example is in `deploy/`.
+4. **Installs the systemd service** and starts it.
+5. **Checks it from the outside** and prints how to connect your client.
 
-### 2. Add users
+It is safe to run again, and it never edits system files without showing the command first. Useful options (see `python -m ytmusic_mcp.cli setup --help`):
+
+| Option | What it does |
+|---|---|
+| `--dry-run` | Show everything it would do and change nothing |
+| `--domain`, `--username` | Answer those questions up front |
+| `--proxy caddy\|nginx\|none` | Choose the web server instead of auto-detecting |
+| `--yes` | No questions (needs `--domain`, `--username` and the password in `YTMUSIC_SETUP_PASSWORD`) |
+| `--replace-site` | Allow replacing an existing Caddy site for the same domain (a backup is kept) |
+| `--caddyfile PATH` | Use a Caddyfile other than `/etc/caddy/Caddyfile` |
+| `--skip-service` | Do not install the systemd service |
+
+The wizard is for Linux servers. For Docker see below; for your own computer see Option A.
+
+**Back up `YTMUSIC_SECRET_KEY`** (in `.env`). It encrypts every stored cookie; without it users must reconnect YouTube.
+
+### 2. Add more users
 
 ```bash
 .venv/bin/python -m ytmusic_mcp.cli add-user alice          # asks for a password (12+ chars)
 ```
 
-That is all that is required. The first time alice connects a client, the sign-in page asks her to paste her YouTube headers, validates them, and stores them encrypted. If you would rather do it for her:
+The first time alice connects a client, the sign-in page asks her to paste her YouTube headers, validates them, and stores them encrypted. You can also do it for her:
 
 ```bash
 .venv/bin/python -m ytmusic_mcp.cli set-cookies alice       # paste headers, or --file headers.txt
@@ -102,12 +127,6 @@ Other commands: `list-users`, `set-password <name>`, `delete-user <name>` (also 
 
 When YouTube expires a session, the failing tool call returns a one-time link (valid 10 minutes) where only that user can paste fresh headers. The `reconnect_youtube_music` tool returns the same link on request.
 
-### 3. Start it
-
-Follow the printed commands to enable the systemd service, get a certificate with certbot (before installing the nginx config, which refers to it), and put nginx in front. You need a domain pointing at the server and ports 80 and 443 open. The app listens on `127.0.0.1` only; nginx is the only public surface, rate-limits the OAuth, login and header-paste routes, and returns 404 for everything else.
-
-Optional: install the fail2ban filter and jail (`deploy/fail2ban-*.conf`) to ban IPs with repeated failed logins.
-
 ### Or: Docker
 
 ```bash
@@ -116,9 +135,9 @@ docker compose up -d --build
 docker compose exec ytmusic-mcp python -m ytmusic_mcp.cli add-user alice
 ```
 
-The port is published on `127.0.0.1` only; put nginx or Caddy in front for HTTPS (see `deploy/nginx.conf.template`). The database lives in the `ytmusic-data` volume.
+The port is published on `127.0.0.1` only; put Caddy, nginx or another reverse proxy in front for HTTPS (see `deploy/`). The database lives in the `ytmusic-data` volume.
 
-### 4. Connect from Claude or ChatGPT
+### 3. Connect from Claude or ChatGPT
 
 1. **Settings → Connectors → Add custom connector.**
 2. URL: `https://mcp.example.com/ytmusic-mcp` (the `MCP_PUBLIC_URL` you configured).

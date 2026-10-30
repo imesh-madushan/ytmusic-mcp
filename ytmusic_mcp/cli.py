@@ -142,6 +142,27 @@ def cmd_local_cookies(args: argparse.Namespace, settings: Settings) -> None:
     print(f"Saved cookies to {path}")
 
 
+def cmd_setup(args: argparse.Namespace, settings: Settings) -> None:
+    """Guided install: configuration, user, web server, service."""
+    from .setup.wizard import Options, run_setup
+
+    code = run_setup(
+        Options(
+            domain=args.domain,
+            username=args.username,
+            proxy=args.proxy,
+            port=args.port,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            replace_site=True if args.replace_site else None,
+            skip_service=args.skip_service,
+            caddyfile=args.caddyfile,
+        )
+    )
+    if code:
+        raise SystemExit(code)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m ytmusic_mcp.cli", description=__doc__.split("\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +186,32 @@ def build_parser() -> argparse.ArgumentParser:
     local = commands.add_parser("local-cookies", help="save cookies for stdio (single-user) mode")
     local.add_argument("--file", help="read headers from this file instead of pasting")
     local.set_defaults(run=cmd_local_cookies)
+
+    setup = commands.add_parser("setup", help="guided server install (config, user, web server, service)")
+    setup.add_argument("--domain", help="public host name, e.g. mcp.example.com")
+    setup.add_argument("--username", help="name of the first sign-in user")
+    setup.add_argument(
+        "--proxy", choices=["auto", "caddy", "nginx", "none"], default="auto", help="web server to configure"
+    )
+    setup.add_argument("--port", type=int, help="local port for the app (default 8787)")
+    setup.add_argument(
+        "--yes",
+        action="store_true",
+        help="no questions; needs --domain, --username and YTMUSIC_SETUP_PASSWORD",
+    )
+    setup.add_argument(
+        "--dry-run", action="store_true", help="show what would happen without changing anything"
+    )
+    setup.add_argument(
+        "--replace-site", action="store_true", help="allow replacing an existing Caddy site for the domain"
+    )
+    setup.add_argument(
+        "--caddyfile",
+        default="/etc/caddy/Caddyfile",
+        help="path of the Caddyfile to edit (default /etc/caddy/Caddyfile)",
+    )
+    setup.add_argument("--skip-service", action="store_true", help="do not install the systemd service")
+    setup.set_defaults(run=cmd_setup)
     return parser
 
 

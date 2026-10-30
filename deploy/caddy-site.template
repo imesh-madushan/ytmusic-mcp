@@ -1,0 +1,23 @@
+${MCP_DOMAIN} {
+	# YouTube Music MCP server. The app has its own OAuth login, so no basic auth here.
+	@mcp path /ytmusic-mcp
+	handle @mcp {
+		rewrite * /mcp
+		reverse_proxy 127.0.0.1:${MCP_PORT} {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	# OAuth discovery, registration, authorization, tokens, login and the YouTube connect page.
+	@mcp_oauth path /register /authorize /token /revoke /login /login/callback /youtube-auth /youtube-auth/callback /.well-known/oauth-protected-resource/ytmusic-mcp /.well-known/oauth-authorization-server /.well-known/oauth-authorization-server/ytmusic-mcp /.well-known/openid-configuration
+	handle @mcp_oauth {
+		reverse_proxy 127.0.0.1:${MCP_PORT} {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	# Nothing else is served.
+	handle {
+		respond 404
+	}
+}
