@@ -34,6 +34,8 @@ build/
 dist/
 !widgets/playlist-manager/dist/
 !widgets/playlist-manager/dist/index.html
+!widgets/oauth-login/dist/
+!widgets/oauth-login/dist/index.html
 *.egg-info/
 .eggs/
 

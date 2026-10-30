@@ -168,7 +168,7 @@ Any client that supports remote MCP servers with OAuth should work the same way;
 
 ### Sign-in page
 
-If `widgets/oauth-login/dist/index.html` exists (build it with `npm run build` in `widgets/oauth-login`), the React sign-in app is served. Otherwise a plain server-rendered page with the same fields is used, so a fresh clone works without Node.
+The React sign-in app is prebuilt and committed (`widgets/oauth-login/dist/index.html`), so a fresh clone shows it with no Node.js needed. To change it, edit `widgets/oauth-login/src`, run `npm run build` there, and commit the new `dist/index.html`. If that file is ever missing, a plain server-rendered page with the same fields is used instead.
 
 ### Upgrading from the single-file layout
 
