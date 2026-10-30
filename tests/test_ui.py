@@ -11,6 +11,8 @@ from ytmusic_mcp.youtube_ops import thumbnail_url
 
 MODERN_URI = "ui://ytmusic/playlist-manager-v4.html"
 OPENAI_URI = "ui://ytmusic/playlist-manager-v4-openai.html"
+V5_URI = "ui://ytmusic/playlist-manager-v5.html"
+V5_OPENAI_URI = "ui://ytmusic/playlist-manager-v5-openai.html"
 LEGACY_URI = "ui://ytmusic/playlist-tracks"
 
 
@@ -53,6 +55,11 @@ def test_playlist_ui_tool_returns_text_and_structured_data():
     yt.get_playlist.assert_called_once_with("PL123", limit=None)  # the widget needs every track
 
 
+def test_playlist_ui_tool_takes_no_limit_so_every_track_is_shown(mcp):
+    schema = mcp._tool_manager.get_tool("get_playlist_tracks_ui").parameters
+    assert list(schema["properties"]) == ["playlist_id"]
+
+
 def test_manager_tool_returns_playlists_as_structured_data():
     yt = MagicMock()
     yt.get_library_playlists.return_value = [{"playlistId": "PL123", "title": "Night Mix", "count": 2}]
@@ -89,6 +96,8 @@ def test_widget_resources_are_registered_for_every_host(mcp):
     assert modern.mime_type == "text/html;profile=mcp-app"
     assert modern.meta["ui"]["prefersBorder"] is True
     assert "https://i.ytimg.com" in modern.meta["ui"]["csp"]["resourceDomains"]
+    assert resources[V5_URI].mime_type == "text/html;profile=mcp-app"
+    assert resources[V5_OPENAI_URI].mime_type == "text/html+skybridge"
     assert chatgpt.mime_type == legacy.mime_type == "text/html+skybridge"
     assert chatgpt.meta["openai/widgetPrefersBorder"] is True
     assert "https://yt3.googleusercontent.com" in legacy.meta["openai/widgetCSP"]["resource_domains"]

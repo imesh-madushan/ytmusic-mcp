@@ -23,6 +23,8 @@ LOGGER = logging.getLogger(__name__)
 
 PLAYLIST_APP_URI = "ui://ytmusic/playlist-manager-v4.html"
 PLAYLIST_OPENAI_URI = "ui://ytmusic/playlist-manager-v4-openai.html"
+PLAYLIST_V5_APP_URI = "ui://ytmusic/playlist-manager-v5.html"
+PLAYLIST_V5_OPENAI_URI = "ui://ytmusic/playlist-manager-v5-openai.html"
 PLAYLIST_LEGACY_URI = "ui://ytmusic/playlist-tracks"
 MCP_APP_MIME_TYPE = "text/html;profile=mcp-app"
 OPENAI_WIDGET_MIME_TYPE = "text/html+skybridge"
@@ -91,13 +93,13 @@ def open_music_manager_ui(yt: YTMusic, limit: int = 100) -> CallToolResult:
     )
 
 
-def get_playlist_tracks_ui(yt: YTMusic, playlist_id: str, limit: int | None = None) -> CallToolResult:
-    """Show a playlist as an interactive track-list UI.
+def get_playlist_tracks_ui(yt: YTMusic, playlist_id: str) -> CallToolResult:
+    """Show every track in a playlist as an interactive track-list UI.
 
     UI-capable clients render a fast, compact track list with metadata, filtering, and
     YouTube Music links. Other clients still receive text and structured data.
     """
-    playlist = ops.get_playlist(yt, playlist_id, limit=limit)
+    playlist = ops.get_playlist(yt, playlist_id, limit=None)
     count = len(playlist["tracks"])
     summary = f"Playlist {playlist['title'] or playlist_id}: {count} track{'' if count == 1 else 's'}."
     return CallToolResult(content=[TextContent(type="text", text=summary)], structuredContent=playlist)
@@ -107,14 +109,8 @@ def get_playlist_tracks_ui(yt: YTMusic, playlist_id: str, limit: int | None = No
 
 
 def register_resources(mcp: FastMCP) -> None:
-    """Expose the widget under the URIs MCP Apps hosts and ChatGPT look for."""
-    mcp.resource(
-        PLAYLIST_APP_URI,
-        name="YouTube Music playlist tracks",
-        description="Interactive ordered playlist track browser",
-        mime_type=MCP_APP_MIME_TYPE,
-        meta={"ui": {"prefersBorder": True, "csp": {"resourceDomains": ARTWORK_DOMAINS}}},
-    )(playlist_manager_html)
+    """Expose the widget under every URI that MCP Apps hosts and ChatGPT may have cached."""
+    modern_meta = {"ui": {"prefersBorder": True, "csp": {"resourceDomains": ARTWORK_DOMAINS}}}
 
     def openai_meta(description: str) -> dict[str, Any]:
         return {
@@ -123,17 +119,46 @@ def register_resources(mcp: FastMCP) -> None:
             "openai/widgetCSP": {"resource_domains": ARTWORK_DOMAINS},
         }
 
-    mcp.resource(
-        PLAYLIST_OPENAI_URI,
-        name="YouTube Music playlist tracks (ChatGPT compatibility)",
-        description="Interactive ordered playlist track browser",
-        mime_type=OPENAI_WIDGET_MIME_TYPE,
-        meta=openai_meta("Manage YouTube Music playlists, tracks, search, and ordering."),
-    )(playlist_manager_html)
-    mcp.resource(
-        PLAYLIST_LEGACY_URI,
-        name="YouTube Music playlist tracks (legacy compatibility)",
-        description="Compatibility alias for previously cached ChatGPT connectors",
-        mime_type=OPENAI_WIDGET_MIME_TYPE,
-        meta=openai_meta("Manage YouTube Music playlists and tracks."),
-    )(playlist_manager_html)
+    full_description = "Manage YouTube Music playlists, tracks, search, and ordering."
+    # (uri, name, description, mime type, host metadata)
+    widgets = [
+        (
+            PLAYLIST_APP_URI,
+            "YouTube Music playlist tracks",
+            "Interactive ordered playlist track browser",
+            MCP_APP_MIME_TYPE,
+            modern_meta,
+        ),
+        (
+            PLAYLIST_OPENAI_URI,
+            "YouTube Music playlist tracks (ChatGPT compatibility)",
+            "Interactive ordered playlist track browser",
+            OPENAI_WIDGET_MIME_TYPE,
+            openai_meta(full_description),
+        ),
+        (
+            PLAYLIST_V5_APP_URI,
+            "YouTube Music playlist tracks (v5 compatibility)",
+            "Compatibility alias serving the stable playlist manager",
+            MCP_APP_MIME_TYPE,
+            modern_meta,
+        ),
+        (
+            PLAYLIST_V5_OPENAI_URI,
+            "YouTube Music playlist tracks (v5 ChatGPT compatibility)",
+            "Compatibility alias serving the stable playlist manager",
+            OPENAI_WIDGET_MIME_TYPE,
+            openai_meta(full_description),
+        ),
+        (
+            PLAYLIST_LEGACY_URI,
+            "YouTube Music playlist tracks (legacy compatibility)",
+            "Compatibility alias for previously cached ChatGPT connectors",
+            OPENAI_WIDGET_MIME_TYPE,
+            openai_meta("Manage YouTube Music playlists and tracks."),
+        ),
+    ]
+    for uri, name, description, mime_type, meta in widgets:
+        mcp.resource(uri, name=name, description=description, mime_type=mime_type, meta=meta)(
+            playlist_manager_html
+        )
