@@ -1,0 +1,87 @@
+# Rendered by deploy/install.sh (${MCP_DOMAIN} and ${MCP_PORT} are filled in).
+#
+# Only HTTPS on port 443 faces the internet, and only the MCP endpoint plus the
+# OAuth routes it needs are proxied. Everything else returns a bare 404. Port 80
+# only redirects to HTTPS and serves certbot's renewal challenge.
+#
+# The app itself listens on 127.0.0.1:${MCP_PORT} and is never exposed directly.
+# Requires nginx 1.25.1+ for the standalone `http2 on;` directive.
+
+limit_req_zone $binary_remote_addr zone=mcp_limit:10m rate=120r/m;
+limit_req_zone $binary_remote_addr zone=oauth_limit:10m rate=30r/m;
+limit_req_zone $binary_remote_addr zone=login_limit:10m rate=10r/m;
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${MCP_DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${MCP_DOMAIN};
+
+    # Filled in automatically by: certbot --nginx -d ${MCP_DOMAIN}
+    ssl_certificate     /etc/letsencrypt/live/${MCP_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${MCP_DOMAIN}/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # The MCP endpoint (served by the app at /mcp). Streaming responses must not be buffered.
+    location = /ytmusic-mcp {
+        limit_req zone=mcp_limit burst=60 nodelay;
+
+        proxy_pass http://127.0.0.1:${MCP_PORT}/mcp;
+        proxy_http_version 1.1;
+        proxy_set_header Host 127.0.0.1:${MCP_PORT};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+
+    # Password attempts get the strictest limit.
+    location = /login/callback {
+        limit_req zone=login_limit burst=5 nodelay;
+        proxy_pass http://127.0.0.1:${MCP_PORT};
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # OAuth: dynamic client registration, authorization, tokens, revocation, login page.
+    location ~ ^/(register|authorize|token|revoke|login)$ {
+        limit_req zone=oauth_limit burst=20 nodelay;
+        proxy_pass http://127.0.0.1:${MCP_PORT};
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # OAuth discovery metadata.
+    location ~ ^/\.well-known/(oauth-protected-resource/ytmusic-mcp|oauth-authorization-server)$ {
+        proxy_pass http://127.0.0.1:${MCP_PORT};
+    }
+
+    # Everything else: nothing here.
+    location / {
+        return 404;
+    }
+
+    access_log /var/log/nginx/ytmusic-mcp.access.log;
+    error_log  /var/log/nginx/ytmusic-mcp.error.log;
+}

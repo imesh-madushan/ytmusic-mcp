@@ -41,3 +41,11 @@ dist/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local data and rendered deploy files
+data/
+*.db
+*.db-wal
+*.db-shm
+deploy/out/
+x.json

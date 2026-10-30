@@ -1,0 +1,32 @@
+# Rendered by deploy/install.sh: @USER@, @APP_DIR@ and @DATA_DIR@ are filled in for this machine.
+[Unit]
+Description=YouTube Music MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@APP_DIR@
+# The leading "-" makes the file optional; the app also reads .env itself.
+EnvironmentFile=-@APP_DIR@/.env
+ExecStart=@APP_DIR@/.venv/bin/python -m ytmusic_mcp
+
+Restart=on-failure
+RestartSec=5
+
+# Sandboxing: the service may only write to its data directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@DATA_DIR@
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

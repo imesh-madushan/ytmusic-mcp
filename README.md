@@ -1,206 +1,143 @@
-# YouTube Music MCP Server (personal, single-user)
+# YouTube Music MCP Server
 
-An MCP server wrapping `ytmusicapi` so Claude (and optionally ChatGPT) can
-search YouTube Music and manage playlists: create/delete, add/remove tracks,
-reorder tracks (top/bottom/before another track).
+An [MCP](https://modelcontextprotocol.io) server that lets Claude (or any MCP client) search YouTube Music and manage playlists: create, rename and delete playlists, add and remove tracks, and reorder them.
 
-**Scope of this setup:** built for exactly one user (you), hosted on your
-own Ubuntu box, protected by an OAuth 2.1 login. Recommended to
-run against a **secondary Google account**, not your main one, since a
-leaked token means full playlist read/write access to whatever account is
-authenticated.
+It runs in two modes:
 
----
+| Mode | For | Auth |
+|---|---|---|
+| **stdio** | Claude Desktop on your own machine | your YouTube cookies in a local file |
+| **http** | a server shared by one or more people | OAuth 2.1 login per user; each user's YouTube cookies are stored encrypted in SQLite |
 
-## 1. Install
+> **Disclaimer.** This project is not affiliated with or endorsed by YouTube or Google. It uses the unofficial [`ytmusicapi`](https://github.com/sigma67/ytmusicapi) library and your browser session cookies, which may go against YouTube's Terms of Service. Use it at your own risk, and prefer a secondary Google account: anyone who gets a user's stored cookies can act as that account.
 
-```bash
-pip install -r requirements.txt
-```
-
-## 2. Auth against YouTube Music (secondary account)
-
-Log into your **secondary Gmail/YouTube account** in the browser you use for
-this, then run:
-
-```bash
-python3 setup_auth.py
-```
-
-Follow the printed steps (DevTools → Network tab → copy request headers
-from a music.youtube.com request). This writes `browser.json`, which
-`server.py` reads automatically. Cookie-based auth can go stale — re-run
-this if tools start failing.
-
-Paste the headers, then press Enter on one additional empty line. Firefox's
-structured request-header JSON export is also accepted. This project uses
-browser-cookie authentication only; OAuth credentials are rejected.
-
-## 3. Local test (optional, before deploying)
-
-```bash
-python3 -c "from server import get_client; print(get_client().get_library_playlists(limit=5))"
-```
-
----
-
-## 4. Deploy on your Ubuntu server
-
-### 4.1 Copy the project over
-
-```bash
-sudo mkdir -p /opt/ytmusic-mcp
-sudo cp server.py oauth_provider.py setup_auth.py requirements.txt .env.example /opt/ytmusic-mcp/
-sudo cp browser.json /opt/ytmusic-mcp/      # the file setup_auth.py made
-cd /opt/ytmusic-mcp
-sudo pip install -r requirements.txt --break-system-packages
-```
-
-### 4.2 Configure
-
-```bash
-sudo cp .env.example /opt/ytmusic-mcp/.env
-openssl rand -base64 32                       # generate the OAuth login password
-sudo nano /opt/ytmusic-mcp/.env               # set public URL, username, and password
-```
-
-Leave `MCP_HOST=127.0.0.1` — the app must never bind directly to the public
-interface. nginx is the only thing facing the internet.
-
-Both direct Python runs and the systemd unit load this same `.env` file.
-Values already exported by the shell or supplied by systemd take precedence.
-nginx does not read dotenv files, so if you change `MCP_PORT` from `8787`,
-also change the port in `proxy_pass` in `nginx-ytmusic-mcp.conf`.
-
-Set `YTMUSIC_LOG_LEVEL=DEBUG` for detailed application diagnostics. Dependency
-protocol logs remain at `MCP_LIBRARY_LOG_LEVEL=INFO` by default so journald does
-not print raw SSE/JSON-RPC payloads. Tool failures are logged with tracebacks and
-are also returned to the MCP client as tool errors.
-
-### 4.3 Run as a systemd service
-
-```bash
-sudo cp ytmusic-mcp.service /etc/systemd/system/
-sudo nano /etc/systemd/system/ytmusic-mcp.service   # set User= to your linux user
-sudo systemctl daemon-reload
-sudo systemctl enable --now ytmusic-mcp
-sudo systemctl status ytmusic-mcp
-journalctl -u ytmusic-mcp -f                        # tail logs
-```
-
-### 4.4 nginx — HTTPS MCP and OAuth routes
-
-```bash
-sudo apt install nginx certbot python3-certbot-nginx
-sudo cp nginx-ytmusic-mcp.conf /etc/nginx/sites-available/ytmusic-mcp
-sudo nano /etc/nginx/sites-available/ytmusic-mcp    # replace mcp.yourdomain.com
-sudo ln -s /etc/nginx/sites-available/ytmusic-mcp /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo certbot --nginx -d mcp.yourdomain.com          # gets the TLS cert, edits the config
-```
-
-You need a domain/subdomain pointed at your server's public IP (any DNS A
-record works), and ports 80+443 open in your firewall. Port 80 exists only
-to redirect to HTTPS and serve certbot's renewal challenge — nothing else
-is served there.
-
-This config exposes `/ytmusic-mcp` and the small set of OAuth discovery,
-registration, authorization, token, and login routes it requires. Other paths
-(`/`, `/admin`, `/.env`, etc.) return a bare 404 before hitting the app.
-It rate-limits MCP and login attempts (30/min, burst 10).
-
-### 4.5 fail2ban — auto-ban repeat offenders
-
-```bash
-sudo apt install fail2ban
-sudo cp fail2ban-filter-ytmusic-mcp.conf /etc/fail2ban/filter.d/ytmusic-mcp.conf
-sudo cp fail2ban-jail-ytmusic-mcp.conf /etc/fail2ban/jail.d/ytmusic-mcp.conf
-sudo systemctl restart fail2ban
-sudo fail2ban-client status ytmusic-mcp     # confirm the jail is active
-```
-
-Any IP racking up 5 unauthorized/probing requests in 10 minutes gets banned
-for 24h.
-
-### 4.6 Verify from outside
-
-```bash
-curl -i https://mcp.yourdomain.com/ytmusic-mcp # expect 401 with OAuth metadata
-curl -i https://mcp.yourdomain.com/anything # expect 404 (nothing else exposed)
-```
-
-Your MCP endpoint: **`https://mcp.yourdomain.com/ytmusic-mcp`**
-
----
-
-## 5. Connect from Claude.ai
-
-1. **Settings → Connectors → Add custom connector.**
-2. URL: `https://mcp.yourdomain.com/ytmusic-mcp`
-3. Normally leave Client ID and Client Secret empty; Claude will use OAuth
-   Dynamic Client Registration. To use the advanced fields instead, configure
-   the matching `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, and Claude callback
-   URI in `OAUTH_REDIRECT_URIS` first.
-4. Save, complete the private username/password login, then enable it in a
-   conversation via **+ → Connectors**.
-
-## 6. Connect from ChatGPT
-
-ChatGPT's remote-connector/custom-header support has been shifting between
-plan tiers and connector types — worth checking OpenAI's current docs for
-the exact click path when you get there. The server side doesn't change:
-it's a standard endpoint at `https://mcp.yourdomain.com/ytmusic-mcp` using
-the standard MCP OAuth discovery and authorization flow.
-
----
-
-## Security summary
-
-- The OAuth login protects access to your YouTube account (via `browser.json`)
-  — use a generated password and keep it private.
-- App binds `127.0.0.1` only; nginx is the sole public-facing surface and
-  exposes only the MCP resource and required OAuth routes on `:443`.
-- Rate limiting + fail2ban blunt scanning/brute-force attempts.
-- Using a secondary Google account caps the blast radius of a leak to that
-  account's playlists, not your main one.
-- Rotate the OAuth password any time you suspect exposure: regenerate, update `.env`,
-  `sudo systemctl restart ytmusic-mcp`.
-- `browser.json` can expire — re-run `setup_auth.py` (on your dev machine,
-  then re-copy to the server) if calls start failing with auth errors.
-
-## Real-account integration tests
-
-The integration suite uses `browser.json` and performs real YouTube Music
-writes. It creates a uniquely named private playlist and deletes it during
-cleanup, including when a test fails. Run it explicitly with:
-
-```bash
-python3 -m pip install -r requirements-test.txt
-pytest --run-youtube-integration -v
-```
-
-Without `--run-youtube-integration`, these account-mutating tests are skipped.
-
----
-
-## Tools exposed
+## Tools
 
 | Tool | What it does |
 |---|---|
-| `search_music` | Search songs/videos/albums/artists/playlists |
+| `search_music` | Search songs, videos, albums, artists or playlists |
 | `list_my_playlists` | List your playlists |
-| `get_playlist` | Get a playlist's tracks (includes `setVideoId`, needed for remove/reorder) |
-| `create_playlist` | Create a new playlist |
-| `delete_playlist` | Delete a playlist |
-| `rename_playlist` | Edit title/description/privacy |
-| `add_tracks_to_playlist` | Add tracks by videoId, optionally to the top |
-| `remove_tracks_from_playlist` | Remove tracks by setVideoId |
+| `get_playlist` | Get a playlist's tracks (includes `setVideoId`, needed to remove or reorder) |
+| `create_playlist` | Create a playlist (`PRIVATE` by default) |
+| `rename_playlist` | Edit title, description or privacy |
+| `delete_playlist` | Delete a playlist *(marked destructive)* |
+| `add_tracks_to_playlist` | Add tracks by `videoId`, optionally to the top |
+| `remove_tracks_from_playlist` | Remove tracks by `setVideoId` *(marked destructive)* |
 | `reorder_playlist_track` | Move a track before another track, or to the end |
-| `move_track_to_top` | Move a track to position 1 |
-| `move_track_to_bottom` | Move a track to the last position |
+| `move_track_to_top` / `move_track_to_bottom` | Move a track to either end |
 
-**ID note:** `videoId` identifies a song (used to *add*); `setVideoId`
-identifies one occurrence of a track *inside a playlist* (used to *remove*
-or *reorder*, since the same song can appear twice with different
-setVideoIds). You never need to look these up manually — ask by song name
-and the assistant calls `get_playlist` first to resolve the right ID.
+`videoId` identifies a song (used to add it). `setVideoId` identifies one occurrence of a song inside a playlist (used to remove or reorder), because the same song can appear twice. You never look these up yourself: the assistant calls `get_playlist` first.
+
+## Getting your YouTube cookies
+
+Both modes need the request headers of a logged-in YouTube Music session:
+
+1. Open [music.youtube.com](https://music.youtube.com) and sign in.
+2. Open DevTools (F12) → **Network**, then reload the page.
+3. Select a `music.youtube.com/youtubei/v1/browse` request and copy its request headers.
+
+Paste them when the commands below ask (finish with an empty line), or save them to a file and pass `--file headers.txt`. Cookies go stale eventually; when tools start failing with an "expired" error, repeat this and re-run the same command.
+
+## Option A: local use with Claude Desktop (stdio)
+
+Requires Python 3.10+.
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install .
+python -m ytmusic_mcp.cli local-cookies      # writes browser.json (permissions 600)
+```
+
+Add to your Claude Desktop config (`claude_desktop_config.json`), using absolute paths:
+
+```json
+{
+  "mcpServers": {
+    "youtube-music": {
+      "command": "/path/to/yt-mcp/.venv/bin/python",
+      "args": ["-m", "ytmusic_mcp"]
+    }
+  }
+}
+```
+
+## Option B: host it for yourself and others (http)
+
+Each user gets their own username, password and YouTube account. Tool calls always run as the user who logged in.
+
+### 1. Install on a Linux server
+
+```bash
+git clone <this repo> && cd yt-mcp
+./deploy/install.sh --domain mcp.example.com
+```
+
+The script works from any directory and for any user. It creates a virtualenv, creates `.env` with a freshly generated `YTMUSIC_SECRET_KEY`, and renders the systemd and nginx files for your machine into `deploy/out/`. It prints the exact `sudo` commands for the remaining steps and never edits `/etc` itself.
+
+**Back up `YTMUSIC_SECRET_KEY`.** It encrypts every stored cookie; without it users must re-add their cookies.
+
+### 2. Add users
+
+```bash
+.venv/bin/python -m ytmusic_mcp.cli add-user alice          # asks for a password (12+ chars)
+.venv/bin/python -m ytmusic_mcp.cli set-cookies alice       # paste headers, or --file headers.txt
+.venv/bin/python -m ytmusic_mcp.cli check-cookies alice     # confirm YouTube accepts them
+```
+
+Other commands: `list-users`, `set-password <name>`, `delete-user <name>` (also revokes their tokens). Changed cookies are picked up immediately; no restart needed.
+
+### 3. Start it
+
+Follow the printed commands to enable the systemd service, put nginx in front and get a certificate with certbot. You need a domain pointing at the server and ports 80 and 443 open. The app listens on `127.0.0.1` only; nginx is the only public surface, rate-limits the OAuth and login routes, and returns 404 for everything else.
+
+Optional: install the fail2ban filter and jail (`deploy/fail2ban-*.conf`) to ban IPs with repeated failed logins.
+
+### Or: Docker
+
+```bash
+cp .env.example .env     # set MCP_PUBLIC_URL and YTMUSIC_SECRET_KEY (docker compose run --rm ytmusic-mcp python -m ytmusic_mcp.cli genkey)
+docker compose up -d --build
+docker compose exec ytmusic-mcp python -m ytmusic_mcp.cli add-user alice
+docker compose exec ytmusic-mcp python -m ytmusic_mcp.cli set-cookies alice
+```
+
+The port is published on `127.0.0.1` only; put nginx or Caddy in front for HTTPS (see `deploy/nginx.conf.template`). The database lives in the `ytmusic-data` volume.
+
+### 4. Connect from Claude
+
+1. **Settings → Connectors → Add custom connector.**
+2. URL: `https://mcp.example.com/ytmusic-mcp` (the `MCP_PUBLIC_URL` you configured).
+3. Leave Client ID and Secret empty (Claude uses Dynamic Client Registration), or configure the `OAUTH_CLIENT_*` variables to use fixed ones.
+4. On the login page, check that the client name and redirect host look right, then sign in with your username and password.
+
+Any client that supports remote MCP servers with OAuth should work the same way; only Claude has been tested.
+
+## Security notes
+
+- **At rest:** passwords are scrypt-hashed, OAuth tokens and codes are stored as SHA-256 hashes, and YouTube cookies are Fernet-encrypted. The encryption key lives only in the environment, never in the database. The database file and its folder are created with owner-only permissions.
+- **Login:** the page shows which client is asking and where it will redirect, forbids framing, allows 5 password attempts per login request, and compares timing-safe against unknown users.
+- **Tokens:** access tokens last 1 hour, refresh tokens 30 days and rotate on use. Revoking one token revokes the whole session, and deleting a user revokes everything.
+- **Tool safety:** inputs are type-checked (`filter` and `privacy_status` are enums), batch sizes are capped, and destructive tools carry the MCP `destructiveHint`.
+- **Process:** the systemd unit is sandboxed (read-only system, writes only to the data directory).
+- **Limits:** this is built for a small, trusted group. There is no admin web UI, and anyone with the server's shell, `.env` and database can use every user's account.
+
+## Development
+
+```bash
+pip install -e ".[test]"
+ruff check . && ruff format --check .
+pytest
+```
+
+The unit tests use mocks and need no account. A separate suite creates and deletes a private playlist on a real account; it is skipped unless you ask for it:
+
+```bash
+python -m ytmusic_mcp.cli local-cookies
+pytest --run-youtube-integration -v
+```
+
+Layout: `ytmusic_mcp/youtube_ops.py` holds the playlist operations, `tools.py` registers them as MCP tools, `oauth.py` and `store.py` implement the multi-user login and SQLite storage, `accounts.py` serves each user's YouTube client, and `cli.py` is the admin tool.
+
+## License
+
+[MIT](LICENSE)

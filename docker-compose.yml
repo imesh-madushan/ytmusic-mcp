@@ -1,0 +1,20 @@
+# Run with:  docker compose up -d --build
+# Manage users: docker compose exec ytmusic-mcp python -m ytmusic_mcp.cli add-user <name>
+services:
+  ytmusic-mcp:
+    build: .
+    env_file: .env
+    environment:
+      # These win over .env so the container layout stays fixed.
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8787"
+      YTMUSIC_DB_PATH: /data/ytmusic-mcp.db
+    ports:
+      # Published on the loopback interface only; put nginx/Caddy in front for HTTPS.
+      - "127.0.0.1:${MCP_PORT:-8787}:8787"
+    volumes:
+      - ytmusic-data:/data
+    restart: unless-stopped
+
+volumes:
+  ytmusic-data:
