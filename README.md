@@ -37,15 +37,20 @@ It runs in two modes:
 
 The built widget is committed (`widgets/playlist-manager/dist/index.html`), so running the server needs no Node. To change it, edit `widgets/playlist-manager`, run `npm run build` there, and commit the new `dist/index.html`. After changing tool or UI metadata, restart the service and reconnect the connector so the host refreshes its tool list.
 
-## Getting your YouTube cookies
+## Copying your YouTube headers
 
-Both modes need the request headers of a logged-in YouTube Music session:
+Playlist access uses the request headers of a logged-in YouTube Music session. **Where you paste them depends on the mode:**
+
+- **Server mode (http):** nothing to do up front, and no command line. The first time you connect a client, the sign-in page asks for the headers, checks them and stores them encrypted.
+- **Local mode (stdio):** there is no sign-in page, so you save them once with a command (see Option A).
+
+To copy them:
 
 1. Open [music.youtube.com](https://music.youtube.com) and sign in.
-2. Open DevTools (F12) → **Network**, then play a song or reload the page.
-3. Select a `music.youtube.com/youtubei/v1/...` request and copy its request headers.
+2. Open DevTools (F12) → **Network**, filter by `youtubei`, then play a song or reload the page.
+3. Right-click a `youtubei/v1/...` request (`browse` or `next`) → **Copy** → **Copy as cURL (bash)** (in Firefox: Copy Value → Copy Request Headers).
 
-Raw headers, a JSON header list, Firefox/Chrome request JSON, HAR and copied cURL are all accepted. Cookies go stale eventually; when tools start failing with an "expired" error, repeat this.
+Raw headers, a JSON header list, Firefox/Chrome request JSON, HAR and copied cURL are all accepted. Cookies go stale eventually. In server mode the failing tool returns a one-time link where you paste fresh headers; in local mode, run the command again.
 
 ## Option A: local use with Claude Desktop (stdio)
 
@@ -79,14 +84,14 @@ Each user gets their own username, password and YouTube account. Tool calls alwa
 You need: a Linux server with Python 3.10+ (`python3-venv` on Debian/Ubuntu), a domain name that already points at it, and ports 80 and 443 open.
 
 ```bash
-git clone <this repo> && cd ytmusic-mcp
+git clone https://github.com/imesh-madushan/ytmusic-mcp && cd ytmusic-mcp
 ./deploy/install.sh
 ```
 
 The script prepares a Python environment and starts a setup wizard that asks for your domain, a username and a password, shows what it is about to do, and then does it step by step:
 
 1. **Checks the machine:** Python, memory, whether the database folder is on a network disk (SQLite must not be), DNS, and which web server already uses ports 80/443.
-2. **Configures the app:** writes `.env` (with a freshly generated encryption key), creates your first user, and can store your YouTube headers right away.
+2. **Configures the app:** writes `.env` (with a freshly generated encryption key), creates your first user, and can optionally store your YouTube headers right away (normally you just paste them on the sign-in page the first time you connect).
 3. **Sets up HTTPS and the web server:**
    - **Caddy** (recommended; it gets certificates itself): your site is added to the Caddyfile. If Caddy is already serving other sites, nothing existing is changed: the file is backed up, the change is validated first, applied with a graceful reload, checked, and **restored automatically** if anything looks wrong. If no web server is installed, it offers to install Caddy (Debian/Ubuntu).
    - **nginx:** gets the certificate first, then installs the site.
@@ -116,16 +121,16 @@ The wizard is for Linux servers. For Docker see below; for your own computer see
 .venv/bin/python -m ytmusic_mcp.cli add-user alice          # asks for a password (12+ chars)
 ```
 
-The first time alice connects a client, the sign-in page asks her to paste her YouTube headers, validates them, and stores them encrypted. You can also do it for her:
+That is all you need to do. The first time alice connects a client, the sign-in page asks her to paste her YouTube headers, checks them, and stores them encrypted. When YouTube later expires the session, the failing tool call returns a one-time link (valid 10 minutes) where only she can paste fresh headers; the `reconnect_youtube_music` tool returns the same link on request.
+
+Other admin commands: `list-users`, `set-password <name>`, `delete-user <name>` (also revokes their tokens).
+
+**Optional shortcut:** if someone cannot use the sign-in page, you can store their headers from the command line instead. Changed cookies are picked up immediately; no restart needed.
 
 ```bash
 .venv/bin/python -m ytmusic_mcp.cli set-cookies alice       # paste headers, or --file headers.txt
 .venv/bin/python -m ytmusic_mcp.cli check-cookies alice     # confirm YouTube accepts them
 ```
-
-Other commands: `list-users`, `set-password <name>`, `delete-user <name>` (also revokes their tokens). Changed cookies are picked up immediately; no restart needed.
-
-When YouTube expires a session, the failing tool call returns a one-time link (valid 10 minutes) where only that user can paste fresh headers. The `reconnect_youtube_music` tool returns the same link on request.
 
 ### 3. Keep it up to date
 
