@@ -104,7 +104,7 @@ When YouTube expires a session, the failing tool call returns a one-time link (v
 
 ### 3. Start it
 
-Follow the printed commands to enable the systemd service, put nginx in front and get a certificate with certbot. You need a domain pointing at the server and ports 80 and 443 open. The app listens on `127.0.0.1` only; nginx is the only public surface, rate-limits the OAuth, login and header-paste routes, and returns 404 for everything else.
+Follow the printed commands to enable the systemd service, get a certificate with certbot (before installing the nginx config, which refers to it), and put nginx in front. You need a domain pointing at the server and ports 80 and 443 open. The app listens on `127.0.0.1` only; nginx is the only public surface, rate-limits the OAuth, login and header-paste routes, and returns 404 for everything else.
 
 Optional: install the fail2ban filter and jail (`deploy/fail2ban-*.conf`) to ban IPs with repeated failed logins.
 

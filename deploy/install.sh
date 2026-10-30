@@ -64,10 +64,13 @@ Done. Next steps:
   sudo cp deploy/out/ytmusic-mcp.service /etc/systemd/system/
   sudo systemctl daemon-reload && sudo systemctl enable --now ytmusic-mcp
 
-  # 3. Put nginx in front (HTTPS)
+  # 3. Put nginx in front (HTTPS). Get the certificate FIRST: the config refers to it,
+  #    so nginx cannot load the config until the certificate exists.
+  #    (DNS for ${DOMAIN} must already point at this server, and port 80 must be open.)
+  sudo apt install -y nginx certbot
+  sudo certbot certonly --webroot -w /var/www/html -d ${DOMAIN}
   sudo cp deploy/out/ytmusic-mcp.nginx.conf /etc/nginx/sites-available/ytmusic-mcp
   sudo ln -s /etc/nginx/sites-available/ytmusic-mcp /etc/nginx/sites-enabled/
-  sudo certbot --nginx -d ${DOMAIN}
   sudo nginx -t && sudo systemctl reload nginx
 
   # 4. Optional: ban repeated failed logins

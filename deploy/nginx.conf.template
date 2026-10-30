@@ -5,7 +5,8 @@
 # only redirects to HTTPS and serves certbot's renewal challenge.
 #
 # The app itself listens on 127.0.0.1:${MCP_PORT} and is never exposed directly.
-# Requires nginx 1.25.1+ for the standalone `http2 on;` directive.
+# Works with the nginx packaged by Ubuntu 22.04 and 24.04. Newer nginx (1.25.1+)
+# only prints a deprecation warning for `listen ... http2`.
 
 limit_req_zone $binary_remote_addr zone=mcp_limit:10m rate=120r/m;
 limit_req_zone $binary_remote_addr zone=oauth_limit:10m rate=30r/m;
@@ -26,12 +27,12 @@ server {
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name ${MCP_DOMAIN};
 
-    # Filled in automatically by: certbot --nginx -d ${MCP_DOMAIN}
+    # Obtain the certificate BEFORE installing this file (see deploy/install.sh):
+    #   certbot certonly --webroot -w /var/www/html -d ${MCP_DOMAIN}
     ssl_certificate     /etc/letsencrypt/live/${MCP_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${MCP_DOMAIN}/privkey.pem;
 
