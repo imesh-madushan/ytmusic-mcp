@@ -7,7 +7,7 @@ name = "ytmusic-mcp"
 version = "0.2.0"
 description = "MCP server for managing YouTube Music playlists from Claude and other MCP clients."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.29,<2",

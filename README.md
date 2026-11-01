@@ -211,4 +211,8 @@ Layout: `ytmusic_mcp/youtube_ops.py` holds the playlist operations, `tools.py` r
 
 ## License
 
-[MIT](LICENSE)
+Copyright (C) 2026 imesh-madushan. Licensed under the [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later).
+
+In short: you may use, study, change and share this software, including commercially. If you modify it and let other people use it over a network (for example by hosting it as a service), you must offer those users the source code of your modified version under the same license. Running the unmodified software for yourself requires nothing special.
+
+Versions published up to and including commit `d5ed82b` (31 October 2026) were released under the MIT License, and copies of those versions remain available under those terms.
